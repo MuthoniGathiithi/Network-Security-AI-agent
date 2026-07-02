@@ -1,26 +1,72 @@
 @import "tailwindcss";
 
+/*
+ * Design tokens. Dark is the primary theme (SOC screens run all day);
+ * light follows the OS setting. Components use the Tailwind names below
+ * (bg-surface, text-muted, border-line, text-threat-high, ...) rather than
+ * raw colors, so both themes stay consistent.
+ */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0b0f14;
+  --surface: #121821;
+  --surface-raised: #18202b;
+  --line: #243041;
+  --foreground: #e6edf3;
+  --muted: #8b98a8;
+  --accent: #3b82f6;
+  --accent-foreground: #ffffff;
+
+  /* Threat levels: same hues as the backend's ThreatLevel.color, tuned for
+     contrast on dark backgrounds */
+  --threat-low: #3fb950;
+  --threat-medium: #f0a020;
+  --threat-high: #ff7a1a;
+  --threat-critical: #f04438;
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --background: #f6f8fa;
+    --surface: #ffffff;
+    --surface-raised: #f0f3f6;
+    --line: #d8dee4;
+    --foreground: #1f2328;
+    --muted: #59636e;
+    --accent: #2563eb;
+    --accent-foreground: #ffffff;
+
+    --threat-low: #1a7f37;
+    --threat-medium: #9a6700;
+    --threat-high: #c2410c;
+    --threat-critical: #cf222e;
+
+    color-scheme: light;
+  }
 }
 
 @theme inline {
   --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-line: var(--line);
   --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-threat-low: var(--threat-low);
+  --color-threat-medium: var(--threat-medium);
+  --color-threat-high: var(--threat-high);
+  --color-threat-critical: var(--threat-critical);
+
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
