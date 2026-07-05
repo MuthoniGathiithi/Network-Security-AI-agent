@@ -19,36 +19,44 @@ import { getServerConfig } from "./config";
  * dashboard's own route handlers instead.
  */
 
-type RequestOptions = {
-  method?: "GET" | "POST" | "DELETE";
-  query?: Record<string, string | number | boolean | undefined>;
-  json?: unknown;
+type SensorFetchOptions = {
+  method?: string;
+  query?: Record<string, string | number | boolean | undefined> | URLSearchParams;
+  headers?: Record<string, string>;
+  body?: BodyInit | null;
   /** Override the default timeout (e.g. for long analyses) */
   timeoutMs?: number;
 };
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+/**
+ * Low-level call to the sensor: adds the API key and a timeout, and turns
+ * network failures into SocApiError. Returns the raw Response (any status),
+ * so it can also be used to stream responses through unchanged.
+ */
+export async function sensorFetch(path: string, options: SensorFetchOptions = {}): Promise<Response> {
   const config = getServerConfig();
   const url = new URL(`${config.apiUrl}${path}`);
-  for (const [key, value] of Object.entries(options.query ?? {})) {
+  const query = options.query instanceof URLSearchParams
+    ? options.query
+    : Object.entries(options.query ?? {});
+  for (const [key, value] of query) {
     if (value !== undefined) url.searchParams.set(key, String(value));
   }
 
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${config.apiKey}`,
-    Accept: "application/json",
-  };
-  if (options.json !== undefined) headers["Content-Type"] = "application/json";
-
-  let response: Response;
   try {
-    response = await fetch(url, {
+    return await fetch(url, {
       method: options.method ?? "GET",
-      headers,
-      body: options.json === undefined ? undefined : JSON.stringify(options.json),
+      headers: {
+        ...options.headers,
+        Authorization: `Bearer ${config.apiKey}`,
+        Accept: "application/json",
+      },
+      body: options.body,
       cache: "no-store", // security data must always be fresh
       signal: AbortSignal.timeout(options.timeoutMs ?? config.apiTimeoutMs),
-    });
+      // Required by Node's fetch to stream a request body (uploads)
+      ...(options.body instanceof ReadableStream ? { duplex: "half" } : {}),
+    } as RequestInit);
   } catch (error) {
     // Don't echo the URL's internals or any header; just say what happened
     if (error instanceof DOMException && error.name === "TimeoutError") {
@@ -56,18 +64,34 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     }
     throw new SocApiError(502, "Could not reach the sensor. Is the API running and SOC_API_URL correct?");
   }
+}
+
+/** Build a SocApiError from a non-2xx sensor response body. */
+export function sensorError(status: number, body: unknown): SocApiError {
+  if (status === 401) {
+    return new SocApiError(401, "The sensor rejected the API key. Check that SOC_API_KEY matches on both sides.");
+  }
+  return new SocApiError(status, errorMessageFromBody(body, `Sensor returned HTTP ${status}`));
+}
+
+type RequestOptions = {
+  method?: "GET" | "POST" | "DELETE";
+  query?: Record<string, string | number | boolean | undefined>;
+  json?: unknown;
+  timeoutMs?: number;
+};
+
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const response = await sensorFetch(path, {
+    method: options.method,
+    query: options.query,
+    headers: options.json === undefined ? {} : { "Content-Type": "application/json" },
+    body: options.json === undefined ? undefined : JSON.stringify(options.json),
+    timeoutMs: options.timeoutMs,
+  });
 
   const body: unknown = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    if (response.status === 401) {
-      throw new SocApiError(401, "The sensor rejected the API key. Check that SOC_API_KEY matches on both sides.");
-    }
-    throw new SocApiError(
-      response.status,
-      errorMessageFromBody(body, `Sensor returned HTTP ${response.status}`),
-    );
-  }
+  if (!response.ok) throw sensorError(response.status, body);
   return body as T;
 }
 
