@@ -97,4 +97,55 @@ export function getServerConfig(): ServerConfig {
 /** For tests: forget the cached config so the next call re-reads the env. */
 export function resetServerConfigForTests(): void {
   cached = undefined;
+  cachedAuth = undefined;
+}
+
+export type AuthConfig = {
+  /** HMAC key for signing session cookies */
+  sessionSecret: string;
+  /** scrypt hash of the dashboard password (scripts/hash-password.mjs) */
+  passwordHash: string;
+  /** How long a sign-in lasts */
+  sessionTtlSeconds: number;
+};
+
+const MIN_SESSION_SECRET_LENGTH = 32;
+// scrypt:N:r:p:salt:hash, with base64url salt and hash. Uses ":" rather than
+// "$" because Next.js expands $VARIABLES inside .env files.
+const PASSWORD_HASH_PATTERN = /^scrypt:\d+:\d+:\d+:[A-Za-z0-9_-]{16,}:[A-Za-z0-9_-]{32,}$/;
+
+let cachedAuth: AuthConfig | undefined;
+
+/**
+ * Read and validate the sign-in configuration.
+ *
+ * @throws ConfigError if a variable is missing or invalid
+ */
+export function getAuthConfig(): AuthConfig {
+  if (cachedAuth) return cachedAuth;
+
+  const sessionSecret = required("SESSION_SECRET");
+  if (sessionSecret.length < MIN_SESSION_SECRET_LENGTH) {
+    throw new ConfigError(`SESSION_SECRET must be at least ${MIN_SESSION_SECRET_LENGTH} characters`);
+  }
+
+  const passwordHash = required("DASHBOARD_PASSWORD_HASH");
+  if (!PASSWORD_HASH_PATTERN.test(passwordHash)) {
+    throw new ConfigError(
+      "DASHBOARD_PASSWORD_HASH is not a valid hash. Generate one with: node scripts/hash-password.mjs",
+    );
+  }
+
+  const ttlRaw = process.env.SESSION_TTL_HOURS?.trim();
+  const ttlHours = ttlRaw ? Number(ttlRaw) : 8;
+  if (!Number.isFinite(ttlHours) || ttlHours <= 0 || ttlHours > 168) {
+    throw new ConfigError("SESSION_TTL_HOURS must be greater than 0 and at most 168 (one week)");
+  }
+
+  cachedAuth = {
+    sessionSecret,
+    passwordHash,
+    sessionTtlSeconds: Math.round(ttlHours * 3600),
+  };
+  return cachedAuth;
 }
