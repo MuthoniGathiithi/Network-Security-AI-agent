@@ -11,7 +11,10 @@ import type {
   SensorStatus,
   ThreatLevel,
 } from "@/lib/types";
+import { redirect } from "next/navigation";
+
 import { getServerConfig } from "./config";
+import { getSession } from "./session";
 
 /*
  * Typed client for the sensor API. Server-only: it attaches the API key,
@@ -82,6 +85,10 @@ type RequestOptions = {
 };
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  // Authorization next to the data: no sensor call without a session,
+  // even if a page forgets to check
+  if (!(await getSession())) redirect("/login");
+
   const response = await sensorFetch(path, {
     method: options.method,
     query: options.query,

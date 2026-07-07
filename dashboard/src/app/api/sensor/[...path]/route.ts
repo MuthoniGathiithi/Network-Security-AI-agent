@@ -2,11 +2,12 @@ import type { NextRequest } from "next/server";
 
 import { SocApiError } from "@/lib/api-error";
 import { ConfigError } from "@/lib/server/config";
+import { getSession } from "@/lib/server/session";
 import { allowedQuery, matchSensorRoute, type SensorRoute } from "@/lib/server/sensor-routes";
 import { sensorError, sensorFetch } from "@/lib/server/soc-client";
 
 /*
- * Proxy from the browser to the sensor API.
+ * Proxy from the browser to the sensor API. Requires a signed-in session.
  *
  * The browser calls /api/sensor/<endpoint>; this handler adds the API key
  * on the server and forwards only allowlisted endpoints (sensor-routes.ts).
@@ -83,6 +84,15 @@ async function handle(
   request: NextRequest,
   ctx: RouteContext<"/api/sensor/[...path]">,
 ): Promise<Response> {
+  try {
+    if (!(await getSession())) return errorResponse(401, "Not signed in");
+  } catch (error) {
+    if (error instanceof ConfigError) {
+      return errorResponse(500, `Dashboard is not configured: ${error.message}`);
+    }
+    throw error;
+  }
+
   const { path } = await ctx.params;
   const matched = matchSensorRoute(request.method, path.join("/"));
   if (!matched) return errorResponse(404, "Unknown sensor endpoint");
