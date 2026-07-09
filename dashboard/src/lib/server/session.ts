@@ -49,3 +49,9 @@ export async function verifySession(): Promise<SessionPayload> {
   if (!session) redirect("/login");
   return session;
 }
+
+/** Seconds until the current session expires (0 when signed out). */
+export async function getSessionSecondsLeft(): Promise<number> {
+  const session = await getSession();
+  return session ? Math.max(0, session.exp - Math.floor(Date.now() / 1000)) : 0;
+}

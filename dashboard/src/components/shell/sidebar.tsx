@@ -3,7 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-import { ShieldIcon } from "@/components/ui/icons";
+import { logout } from "@/app/(app)/actions";
+import { LogOutIcon, ShieldIcon } from "@/components/ui/icons";
 import { NAV_ITEMS, isActive } from "./nav-items";
 
 /**
@@ -18,6 +19,8 @@ export function Sidebar() {
       <div className="flex items-center gap-2 px-4 py-3 md:py-5">
         <ShieldIcon className="text-accent size-6" />
         <span className="font-semibold tracking-tight">SOC Dashboard</span>
+        {/* Mobile: sign out sits in the header row */}
+        <SignOutButton className="ml-auto md:hidden" compact />
       </div>
 
       <nav aria-label="Main" className="overflow-x-auto md:overflow-visible">
@@ -43,6 +46,26 @@ export function Sidebar() {
           })}
         </ul>
       </nav>
+
+      {/* Desktop: sign out pinned to the bottom of the sidebar */}
+      <div className="mt-auto hidden px-2 pb-4 md:block">
+        <SignOutButton />
+      </div>
     </aside>
+  );
+}
+
+function SignOutButton({ className = "", compact = false }: { className?: string; compact?: boolean }) {
+  return (
+    <form action={logout} className={className}>
+      <button
+        type="submit"
+        aria-label={compact ? "Sign out" : undefined}
+        className="text-muted hover:bg-surface-raised hover:text-foreground flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors"
+      >
+        <LogOutIcon className="size-4 shrink-0" />
+        {!compact && "Sign out"}
+      </button>
+    </form>
   );
 }
