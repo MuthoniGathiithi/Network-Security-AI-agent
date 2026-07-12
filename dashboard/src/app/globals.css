@@ -16,12 +16,12 @@
   --accent: #3b82f6;
   --accent-foreground: #ffffff;
 
-  /* Threat levels: same hues as the backend's ThreatLevel.color, tuned for
-     contrast on dark backgrounds */
+  /* Threat levels: same hues as the backend's ThreatLevel.color, tuned so
+     text meets WCAG AA (4.5:1) on surfaces and on 10-15% tinted badges */
   --threat-low: #3fb950;
   --threat-medium: #f0a020;
   --threat-high: #ff7a1a;
-  --threat-critical: #f04438;
+  --threat-critical: #ff6a5e;
 
   color-scheme: dark;
 }
@@ -37,10 +37,10 @@
     --accent: #2563eb;
     --accent-foreground: #ffffff;
 
-    --threat-low: #1a7f37;
-    --threat-medium: #9a6700;
-    --threat-high: #c2410c;
-    --threat-critical: #cf222e;
+    --threat-low: #116329;
+    --threat-medium: #7d4e00;
+    --threat-high: #a3360b;
+    --threat-critical: #b3141f;
 
     color-scheme: light;
   }

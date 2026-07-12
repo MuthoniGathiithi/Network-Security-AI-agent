@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 
 import { OverviewStats, OverviewStatsSkeleton } from "@/components/overview/overview-stats";
+import { ThreatLegend } from "@/components/overview/threat-legend";
 import { PageHeader } from "@/components/ui/page-header";
 
 export default function OverviewPage() {
@@ -11,6 +12,8 @@ export default function OverviewPage() {
       <Suspense fallback={<OverviewStatsSkeleton />}>
         <OverviewStats />
       </Suspense>
+      {/* Static: part of the prerendered shell, shows instantly */}
+      <ThreatLegend />
     </>
   );
 }
