@@ -2,6 +2,10 @@ import { Suspense } from "react";
 
 import { OverviewStats, OverviewStatsSkeleton } from "@/components/overview/overview-stats";
 import { RecentThreats, RecentThreatsSkeleton } from "@/components/overview/recent-threats";
+import {
+  ThreatDistribution,
+  ThreatDistributionSkeleton,
+} from "@/components/overview/threat-distribution";
 import { ThreatLegend } from "@/components/overview/threat-legend";
 import { PageHeader } from "@/components/ui/page-header";
 
@@ -13,7 +17,10 @@ export default function OverviewPage() {
       <Suspense fallback={<OverviewStatsSkeleton />}>
         <OverviewStats />
       </Suspense>
-      {/* Separate boundary: each section shows as soon as its data arrives */}
+      {/* Separate boundaries: each section shows as soon as its data arrives */}
+      <Suspense fallback={<ThreatDistributionSkeleton />}>
+        <ThreatDistribution />
+      </Suspense>
       <Suspense fallback={<RecentThreatsSkeleton />}>
         <RecentThreats />
       </Suspense>

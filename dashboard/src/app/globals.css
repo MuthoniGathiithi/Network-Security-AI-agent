@@ -16,12 +16,20 @@
   --accent: #3b82f6;
   --accent-foreground: #ffffff;
 
-  /* Threat levels: same hues as the backend's ThreatLevel.color, tuned so
-     text meets WCAG AA (4.5:1) on surfaces and on 10-15% tinted badges */
+  /* Threat levels: green -> yellow -> orange -> red, like the backend's
+     ThreatLevel.color. Text tokens meet WCAG AA (4.5:1) on surfaces and on
+     the 10-15% tinted badges; neighbouring levels stay distinguishable
+     (OKLab delta E >= 15 normal vision, >= 8 colour-blind), checked with
+     the dataviz palette validator. */
   --threat-low: #3fb950;
-  --threat-medium: #f0a020;
-  --threat-high: #ff7a1a;
-  --threat-critical: #ff6a5e;
+  --threat-medium: #fbe36a;
+  --threat-high: #fb9a51;
+  --threat-critical: #fb5173;
+  /* Chart marks: in dark mode the text colours work for bars too */
+  --threat-low-fill: var(--threat-low);
+  --threat-medium-fill: var(--threat-medium);
+  --threat-high-fill: var(--threat-high);
+  --threat-critical-fill: var(--threat-critical);
 
   color-scheme: dark;
 }
@@ -41,6 +49,14 @@
     --threat-medium: #7d4e00;
     --threat-high: #a3360b;
     --threat-critical: #b3141f;
+    /* Text on white must be dark, which makes the levels hard to tell
+       apart, so chart marks use brighter fills. MEDIUM's yellow is below
+       3:1 on white; allowed because every bar is labelled with its level
+       and value. */
+    --threat-low-fill: #0f8a0f;
+    --threat-medium-fill: #f9b806;
+    --threat-high-fill: #f36016;
+    --threat-critical-fill: #b31933;
 
     color-scheme: light;
   }
@@ -60,6 +76,10 @@
   --color-threat-medium: var(--threat-medium);
   --color-threat-high: var(--threat-high);
   --color-threat-critical: var(--threat-critical);
+  --color-threat-low-fill: var(--threat-low-fill);
+  --color-threat-medium-fill: var(--threat-medium-fill);
+  --color-threat-high-fill: var(--threat-high-fill);
+  --color-threat-critical-fill: var(--threat-critical-fill);
 
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
