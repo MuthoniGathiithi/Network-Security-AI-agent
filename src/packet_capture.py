@@ -8,14 +8,14 @@ Extracts NetFlow-style features for ML analysis.
 import logging
 import queue
 import time
-from typing import Iterator, Optional, Dict, Any, List, Tuple
+from typing import Iterable, Iterator, Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
 import struct
 import socket
 
 try:
-    from scapy.all import AsyncSniffer, rdpcap, IP, TCP, UDP, ICMP, Raw
+    from scapy.all import AsyncSniffer, PcapReader, IP, TCP, UDP, ICMP, Raw
 except ImportError:
     raise ImportError("Scapy not installed. Install with: pip install scapy")
 
@@ -43,13 +43,16 @@ class FlowAggregator:
     A flow is bidirectional communication between two hosts.
     """
 
-    def __init__(self, timeout: float = 30.0):
+    def __init__(self, timeout: float = 30.0, sweep_interval: float = 1.0):
         """
         Initialize flow aggregator.
 
         Args:
             timeout: Idle timeout in seconds. A flow with no packets for
                 this long is considered complete.
+            sweep_interval: Minimum seconds (of capture time) between scans
+                of the whole flow table for idle flows. Scanning on every
+                packet is O(packets x flows) and very slow on big captures.
         """
         self.flows: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
             "packets_fwd": [],
@@ -71,6 +74,8 @@ class FlowAggregator:
         # Latest time seen, taken from packet timestamps so that pcap replay
         # expires flows on capture time rather than wall-clock time
         self.current_time: Optional[float] = None
+        self.sweep_interval = sweep_interval
+        self._last_sweep: Optional[float] = None
         logger.info(f"FlowAggregator initialized (timeout={timeout}s)")
 
     def advance_clock(self, timestamp: float) -> None:
@@ -89,6 +94,47 @@ class FlowAggregator:
             self.current_time is not None
             and self.current_time - flow["last_timestamp"] > self.timeout
         )
+
+    @staticmethod
+    def is_finished(flow: Dict[str, Any]) -> bool:
+        """Return True if the flow's TCP connection was reset or closed."""
+        reset = flow["flags_fwd"]["RST"] > 0 or flow["flags_bwd"]["RST"] > 0
+        return reset or flow["closed"]
+
+    def flow_key(self, metadata: PacketMetadata) -> str:
+        """Return the canonical flow key for a packet."""
+        return self._get_flow_key(
+            metadata.src_ip,
+            metadata.dst_ip,
+            metadata.protocol,
+            metadata.src_port,
+            metadata.dst_port
+        )
+
+    def get_expired_flows(self, force: bool = False) -> List[Tuple[str, Dict[str, Any]]]:
+        """
+        Return flows idle longer than the timeout.
+
+        The full-table scan runs at most once per sweep_interval of capture
+        time, unless force is True.
+
+        Args:
+            force: Scan even if the sweep interval hasn't elapsed
+
+        Returns:
+            List of (flow_key, flow_data)
+        """
+        if self.current_time is None:
+            return []
+        if (not force and self._last_sweep is not None
+                and self.current_time - self._last_sweep < self.sweep_interval):
+            return []
+
+        self._last_sweep = self.current_time
+        return [
+            (key, flow) for key, flow in self.flows.items()
+            if flow["last_timestamp"] is not None and self._is_expired(flow)
+        ]
 
     def _get_flow_key(
         self,
@@ -117,21 +163,17 @@ class FlowAggregator:
 
         return f"{ips[0]}-{ips[1]}-{protocol}-{ports[0]}-{ports[1]}"
 
-    def add_packet(self, metadata: PacketMetadata) -> None:
+    def add_packet(self, metadata: PacketMetadata) -> str:
         """
         Add a packet to the appropriate flow.
 
         Args:
             metadata: PacketMetadata object
-        """
-        key = self._get_flow_key(
-            metadata.src_ip,
-            metadata.dst_ip,
-            metadata.protocol,
-            metadata.src_port,
-            metadata.dst_port
-        )
 
+        Returns:
+            The flow key the packet was added to
+        """
+        key = self.flow_key(metadata)
         flow = self.flows[key]
 
         # Initialize flow metadata. The sender of the first packet is treated
@@ -172,6 +214,8 @@ class FlowAggregator:
                 else:
                     flow["flags_bwd"][flag_name] += 1
 
+        return key
+
     def get_completed_flows(self) -> Iterator[Tuple[str, Dict[str, Any]]]:
         """
         Yield flows that are complete.
@@ -188,9 +232,7 @@ class FlowAggregator:
             if flow["last_timestamp"] is None:
                 continue
 
-            reset = flow["flags_fwd"]["RST"] > 0 or flow["flags_bwd"]["RST"] > 0
-
-            if reset or flow["closed"] or self._is_expired(flow):
+            if self.is_finished(flow) or self._is_expired(flow):
                 yield key, flow
 
     def get_all_flows(self) -> Iterator[Tuple[str, Dict[str, Any]]]:
@@ -499,19 +541,23 @@ class PacketCapture:
             Tuple of (FlowFeatures, src_ip, dst_ip) for completed flows
         """
         try:
-            packets = rdpcap(pcap_file)
-            logger.info(f"Loaded {len(packets)} packets from {pcap_file}")
+            packet_count = 0
+            # Stream packets one at a time; rdpcap() would load the whole
+            # file into memory, which fails on multi-GB captures
+            with PcapReader(pcap_file) as reader:
+                for packet in reader:
+                    packet_count += 1
+                    if callback:
+                        callback(packet)
 
-            for packet in packets:
-                if callback:
-                    callback(packet)
+                    metadata = self._extract_packet_info(packet)
+                    if metadata:
+                        yield from self._process_packet(metadata)
 
-                metadata = self._extract_packet_info(packet)
-                if metadata:
-                    yield from self._process_packet(metadata)
+            logger.info(f"Read {packet_count} packets from {pcap_file}")
 
             # End of file: analyze flows that never met the completion criteria
-            yield from self._emit_completed_flows(flush=True)
+            yield from self._emit_flows(self.flow_aggregator.get_all_flows())
 
         except Exception as e:
             logger.error(f"Failed to read pcap file: {e}")
@@ -524,9 +570,10 @@ class PacketCapture:
         """
         Add a packet to its flow and yield any flows that are now complete.
 
-        Idle flows are expired *before* the packet is added, so a packet
-        arriving after a long gap starts a new flow instead of extending
-        the old one.
+        Only the packet's own flow is checked for FIN/RST completion; the
+        rest of the table is swept for idle flows at most once per
+        sweep_interval. This keeps per-packet cost independent of the
+        number of open flows.
 
         Args:
             metadata: PacketMetadata for the incoming packet
@@ -534,42 +581,50 @@ class PacketCapture:
         Yields:
             Tuple of (FlowFeatures, src_ip, dst_ip) for completed flows
         """
-        self.flow_aggregator.advance_clock(metadata.timestamp)
-        yield from self._emit_completed_flows()
+        aggregator = self.flow_aggregator
+        aggregator.advance_clock(metadata.timestamp)
+        key = aggregator.flow_key(metadata)
 
-        self.flow_aggregator.add_packet(metadata)
-        yield from self._emit_completed_flows()
+        # A packet arriving after its flow went idle starts a new flow
+        # instead of extending the old one
+        existing = aggregator.flows.get(key)
+        if existing is not None and aggregator._is_expired(existing):
+            yield from self._emit_flows([(key, existing)])
 
-    def _emit_completed_flows(
+        yield from self._emit_flows(aggregator.get_expired_flows())
+
+        aggregator.add_packet(metadata)
+        flow = aggregator.flows[key]
+        if aggregator.is_finished(flow):
+            yield from self._emit_flows([(key, flow)])
+
+    def _emit_flows(
         self,
-        flush: bool = False
+        flows: Iterable[Tuple[str, Dict[str, Any]]]
     ) -> Iterator[Tuple[FlowFeatures, str, str]]:
         """
-        Extract features for completed flows, yield them, and evict them.
+        Extract features for the given flows, yield them, and evict them.
 
         Args:
-            flush: If True, emit every remaining flow (end of capture)
+            flows: (flow_key, flow_data) pairs to emit
 
         Yields:
-            Tuple of (FlowFeatures, src_ip, dst_ip) for completed flows
+            Tuple of (FlowFeatures, src_ip, dst_ip) for each flow
         """
-        if flush:
-            flows = self.flow_aggregator.get_all_flows()
-        else:
-            flows = self.flow_aggregator.get_completed_flows()
-
-        completed_keys = []
-        for flow_key, flow_data in flows:
+        done_keys = []
+        for flow_key, flow_data in list(flows):
+            # Evict even on failure, so a bad flow isn't retried forever
+            done_keys.append(flow_key)
             try:
                 features, src_ip, dst_ip = self.feature_extractor.extract_features(
                     flow_data["src_ip"], flow_data["dst_ip"], flow_data
                 )
-                yield features, src_ip, dst_ip
-                completed_keys.append(flow_key)
             except Exception as e:
-                logger.debug(f"Feature extraction failed: {e}")
+                logger.warning(f"Feature extraction failed for flow {flow_key}: {e}")
+                continue
+            yield features, src_ip, dst_ip
 
-        self.flow_aggregator.clear_completed_flows(completed_keys)
+        self.flow_aggregator.clear_completed_flows(done_keys)
 
     def capture_live(
         self,
@@ -608,7 +663,7 @@ class PacketCapture:
                 except queue.Empty:
                     # No traffic: still expire idle flows on wall-clock time
                     self.flow_aggregator.advance_clock(time.time())
-                    yield from self._emit_completed_flows()
+                    yield from self._emit_flows(self.flow_aggregator.get_expired_flows())
                     continue
 
                 if callback:
@@ -619,7 +674,7 @@ class PacketCapture:
                     yield from self._process_packet(metadata)
 
             # Capture finished (packet_count reached): flush remaining flows
-            yield from self._emit_completed_flows(flush=True)
+            yield from self._emit_flows(self.flow_aggregator.get_all_flows())
 
         except Exception as e:
             logger.error(f"Live capture failed: {e}")
