@@ -6,6 +6,7 @@ Extracts NetFlow-style features for ML analysis.
 """
 
 import logging
+import os
 import queue
 import time
 from typing import Iterable, Iterator, Optional, Dict, Any, List, Tuple
@@ -18,10 +19,15 @@ try:
     from scapy.all import AsyncSniffer, PcapReader, IP, TCP, UDP, ICMP, Raw
 except ImportError:
     raise ImportError("Scapy not installed. Install with: pip install scapy")
+from scapy.error import Scapy_Exception
 
 from src.detection_agent import FlowFeatures
 
 logger = logging.getLogger(__name__)
+
+
+class PcapReadError(ValueError):
+    """Raised when a capture file exists but can't be read as pcap/pcapng."""
 
 
 @dataclass
@@ -539,29 +545,59 @@ class PacketCapture:
 
         Yields:
             Tuple of (FlowFeatures, src_ip, dst_ip) for completed flows
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist
+            PermissionError: If the file isn't readable
+            PcapReadError: If the path is not a regular file or not a
+                valid pcap/pcapng capture
         """
+        self._check_pcap_path(pcap_file)
+
         try:
-            packet_count = 0
-            # Stream packets one at a time; rdpcap() would load the whole
-            # file into memory, which fails on multi-GB captures
-            with PcapReader(pcap_file) as reader:
-                for packet in reader:
-                    packet_count += 1
-                    if callback:
-                        callback(packet)
+            reader = PcapReader(pcap_file)
+        except Scapy_Exception as e:
+            raise PcapReadError(
+                f"Not a valid pcap/pcapng file: {pcap_file} ({e})"
+            ) from None
 
-                    metadata = self._extract_packet_info(packet)
-                    if metadata:
-                        yield from self._process_packet(metadata)
+        packet_count = 0
+        # Stream packets one at a time; rdpcap() would load the whole
+        # file into memory, which fails on multi-GB captures
+        with reader:
+            for packet in reader:
+                packet_count += 1
+                if callback:
+                    callback(packet)
 
-            logger.info(f"Read {packet_count} packets from {pcap_file}")
+                metadata = self._extract_packet_info(packet)
+                if metadata:
+                    yield from self._process_packet(metadata)
 
-            # End of file: analyze flows that never met the completion criteria
-            yield from self._emit_flows(self.flow_aggregator.get_all_flows())
+        logger.info(f"Read {packet_count} packets from {pcap_file}")
 
-        except Exception as e:
-            logger.error(f"Failed to read pcap file: {e}")
-            raise
+        # End of file: analyze flows that never met the completion criteria
+        yield from self._emit_flows(self.flow_aggregator.get_all_flows())
+
+    @staticmethod
+    def _check_pcap_path(pcap_file: str) -> None:
+        """
+        Fail early with a clear error if the capture file can't be opened.
+
+        Args:
+            pcap_file: Path to the capture file
+
+        Raises:
+            FileNotFoundError, PermissionError, PcapReadError
+        """
+        if not os.path.exists(pcap_file):
+            raise FileNotFoundError(f"Capture file not found: {pcap_file}")
+        if not os.path.isfile(pcap_file):
+            raise PcapReadError(f"Capture path is not a regular file: {pcap_file}")
+        if not os.access(pcap_file, os.R_OK):
+            raise PermissionError(f"Capture file is not readable: {pcap_file}")
+        if os.path.getsize(pcap_file) == 0:
+            raise PcapReadError(f"Capture file is empty: {pcap_file}")
 
     def _process_packet(
         self,
