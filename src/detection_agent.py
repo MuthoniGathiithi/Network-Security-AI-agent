@@ -4,7 +4,8 @@ Detection Agent for Network-Security-AI-Agent
 This agent analyzes network traffic patterns and uses ML models (TabNet, Isolation Forest)
 combined with MITRE ATT&CK knowledge to detect malicious behavior in real-time.
 
-Uses CrewAI framework for multi-agent orchestration.
+CrewAI agents are optional (enable_crew=True); detection itself runs on
+the local ML model and heuristics and needs no LLM.
 """
 
 import json
@@ -19,9 +20,10 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
 try:
-    from crewai import Agent, Task, Crew
+    from crewai import Agent
+    CREWAI_AVAILABLE = True
 except ImportError:
-    raise ImportError("CrewAI not installed. Install with: pip install crewai")
+    CREWAI_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +277,8 @@ class DetectionAgent:
     def __init__(
         self,
         model_path: Optional[str] = None,
-        max_history: int = DEFAULT_MAX_HISTORY
+        max_history: int = DEFAULT_MAX_HISTORY,
+        enable_crew: bool = False
     ):
         """
         Initialize the Detection Agent.
@@ -285,6 +288,9 @@ class DetectionAgent:
             max_history: Maximum detections kept in memory. Oldest are
                 dropped first, so long-running live capture can't exhaust
                 memory. Use export_results() to persist them.
+            enable_crew: Set up CrewAI analyst agents. Off by default: they
+                need the crewai package and an LLM API key, and detection
+                doesn't depend on them.
         """
         if max_history < 1:
             raise ValueError("max_history must be at least 1")
@@ -293,13 +299,23 @@ class DetectionAgent:
         self.mitre_rag = MitreAttackRAG()
         self.detection_history: Deque[DetectionResult] = deque(maxlen=max_history)
 
+        self.ml_analyst = None
+        self.threat_analyst = None
+
         logger.info("Detection Agent initialized")
 
-        # Initialize CrewAI crew
-        self._setup_crew()
+        if enable_crew:
+            self._setup_crew()
 
     def _setup_crew(self) -> None:
         """Setup CrewAI agents and crew for coordinated detection."""
+        if not CREWAI_AVAILABLE:
+            logger.warning(
+                "enable_crew=True but CrewAI is not installed "
+                "(pip install crewai); continuing without it"
+            )
+            return
+
         try:
             # Define ML Analysis Agent
             self.ml_analyst = Agent(
