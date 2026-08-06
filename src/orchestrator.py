@@ -20,6 +20,28 @@ from src.packet_capture import PacketCapture
 logger = logging.getLogger(__name__)
 
 
+def _json_default(obj: Any) -> Any:
+    """
+    Fallback JSON encoder for values json doesn't handle natively.
+
+    Args:
+        obj: Object json.dump couldn't serialize
+
+    Returns:
+        A JSON-serializable equivalent
+
+    Raises:
+        TypeError: For types with no sensible JSON form
+    """
+    if isinstance(obj, np.generic):  # np.int64, np.float32, np.bool_, ...
+        return obj.item()
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (set, frozenset)):
+        return sorted(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 class SOCAgent:
     """
     Autonomous SOC Analyst Agent that continuously monitors network traffic,
@@ -217,7 +239,7 @@ class SOCAgent:
         }
 
         with open(output_file, "w") as f:
-            json.dump(data, f, indent=2)
+            json.dump(data, f, indent=2, default=_json_default)
 
         logger.info(f"Results exported to {output_file}")
 

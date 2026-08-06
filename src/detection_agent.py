@@ -94,6 +94,17 @@ class FlowFeatures:
     idle_max: float
     idle_min: float
 
+    def __post_init__(self) -> None:
+        """
+        Coerce every field to its declared Python type.
+
+        Feature extraction produces numpy scalars (np.float64, np.int64),
+        which json can't serialize. Normalizing here means every consumer
+        (export, API, dashboard) gets plain int/float values.
+        """
+        for f in fields(self):
+            setattr(self, f.name, f.type(getattr(self, f.name)))
+
     def to_array(self) -> np.ndarray:
         """Convert all features to a 1D numpy array for ML model input."""
         values = [
