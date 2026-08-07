@@ -64,7 +64,7 @@ class SOCAgent:
             dry_run: If True, don't execute blocking/alerts
             slack_webhook: Slack webhook URL
             webhook_urls: List of custom webhook URLs
-            model_path: Path to pre-trained ML model
+            model_path: Path to a model saved with save_model(); skips retraining
             allowlist: IPs or CIDR ranges that must never be blocked
             blocklist_file: Path to the blocklist file
         """
@@ -111,6 +111,17 @@ class SOCAgent:
             logger.info(f"Trained on {flow_count} benign flows")
         else:
             logger.warning("No training data extracted")
+
+    def save_model(self, path: str) -> None:
+        """
+        Save the trained detection model.
+
+        Reload it later with SOCAgent(model_path=path) instead of retraining.
+
+        Args:
+            path: Destination file path
+        """
+        self.detection_agent.save_model(path)
 
     def analyze_pcap(
         self,

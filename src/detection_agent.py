@@ -10,12 +10,17 @@ the local ML model and heuristics and needs no LLM.
 
 import json
 import logging
+import os
+import stat
+import tempfile
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, fields
 
+import joblib
 import numpy as np
+import sklearn
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
@@ -169,8 +174,112 @@ class MLDetectionModel:
         )
         self.scaler = StandardScaler()
         self.is_fitted = False
+        self.n_features: Optional[int] = None
+        self.n_samples: Optional[int] = None
+        self.trained_at: Optional[str] = None
         self._warned_unfitted = False
         logger.info("MLDetectionModel initialized with Isolation Forest")
+
+    # Bump when the saved bundle layout changes
+    MODEL_FORMAT_VERSION = 1
+
+    def save(self, path: str) -> None:
+        """
+        Save the fitted model and scaler to a single joblib file.
+
+        The file is written atomically with owner-only permissions (0600).
+
+        Args:
+            path: Destination file path
+
+        Raises:
+            RuntimeError: If the model hasn't been trained
+        """
+        if not self.is_fitted:
+            raise RuntimeError("Cannot save an untrained model; call fit() first")
+
+        bundle = {
+            "format_version": self.MODEL_FORMAT_VERSION,
+            "model": self.model,
+            "scaler": self.scaler,
+            "n_features": self.n_features,
+            "n_samples": self.n_samples,
+            "trained_at": self.trained_at,
+            "sklearn_version": sklearn.__version__,
+        }
+
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".model-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                joblib.dump(bundle, f)
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            raise
+        logger.info(f"Model saved to {path}")
+
+    @classmethod
+    def load(cls, path: str) -> "MLDetectionModel":
+        """
+        Load a model saved with save().
+
+        joblib files are pickles, and unpickling can execute arbitrary code,
+        so only load models you created. As a guard, files that other users
+        can modify are refused.
+
+        Args:
+            path: Path to the saved model
+
+        Returns:
+            A fitted MLDetectionModel
+
+        Raises:
+            FileNotFoundError: If the file doesn't exist
+            PermissionError: If the file is writable by group or others
+            ValueError: If the file isn't a model saved by this class
+        """
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Model file not found: {path}")
+        if os.stat(path).st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise PermissionError(
+                f"Refusing to load {path}: it is writable by other users and "
+                f"could have been tampered with (chmod 600 it if you trust it)"
+            )
+
+        bundle = joblib.load(path)
+
+        if (not isinstance(bundle, dict)
+                or bundle.get("format_version") != cls.MODEL_FORMAT_VERSION
+                or not isinstance(bundle.get("model"), IsolationForest)
+                or not isinstance(bundle.get("scaler"), StandardScaler)):
+            raise ValueError(
+                f"{path} is not a model saved by MLDetectionModel.save() "
+                f"(format version {cls.MODEL_FORMAT_VERSION})"
+            )
+
+        if bundle.get("sklearn_version") != sklearn.__version__:
+            logger.warning(
+                f"Model was saved with scikit-learn {bundle.get('sklearn_version')} "
+                f"but {sklearn.__version__} is installed; consider retraining"
+            )
+
+        instance = cls()
+        instance.model = bundle["model"]
+        instance.scaler = bundle["scaler"]
+        instance.n_features = bundle["n_features"]
+        instance.n_samples = bundle.get("n_samples")
+        instance.trained_at = bundle.get("trained_at")
+        instance.is_fitted = True
+        logger.info(
+            f"Model loaded from {path} (trained {instance.trained_at} "
+            f"on {instance.n_samples} samples)"
+        )
+        return instance
 
     def fit(self, features: np.ndarray) -> None:
         """
@@ -183,6 +292,8 @@ class MLDetectionModel:
             scaled_features = self.scaler.fit_transform(features)
             self.model.fit(scaled_features)
             self.is_fitted = True
+            self.n_samples, self.n_features = features.shape
+            self.trained_at = datetime.now(timezone.utc).isoformat()
             logger.info(f"Model trained on {len(features)} samples")
         except Exception as e:
             logger.error(f"Model training failed: {e}")
@@ -295,7 +406,7 @@ class DetectionAgent:
         Initialize the Detection Agent.
 
         Args:
-            model_path: Path to pre-trained ML model (optional)
+            model_path: Path to a model saved with save_model() (optional)
             max_history: Maximum detections kept in memory. Oldest are
                 dropped first, so long-running live capture can't exhaust
                 memory. Use export_results() to persist them.
@@ -306,7 +417,16 @@ class DetectionAgent:
         if max_history < 1:
             raise ValueError("max_history must be at least 1")
 
-        self.ml_model = MLDetectionModel()
+        if model_path:
+            self.ml_model = MLDetectionModel.load(model_path)
+            expected = len(fields(FlowFeatures))
+            if self.ml_model.n_features != expected:
+                raise ValueError(
+                    f"Model at {model_path} expects {self.ml_model.n_features} "
+                    f"features but FlowFeatures has {expected}; retrain it"
+                )
+        else:
+            self.ml_model = MLDetectionModel()
         self.mitre_rag = MitreAttackRAG()
         self.detection_history: Deque[DetectionResult] = deque(maxlen=max_history)
 
@@ -368,6 +488,15 @@ class DetectionAgent:
             )
         self.ml_model.fit(training_data)
         logger.info("Detection Agent ML model trained")
+
+    def save_model(self, path: str) -> None:
+        """
+        Save the trained ML model so it can be reloaded via model_path.
+
+        Args:
+            path: Destination file path
+        """
+        self.ml_model.save(path)
 
     def detect(
         self,
