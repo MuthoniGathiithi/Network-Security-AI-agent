@@ -1,212 +1,195 @@
 #!/usr/bin/env python3
 """
-Script to train the ML model for the Network Security AI Agent.
+Train the anomaly detection model for the Network Security AI Agent.
+
+The model is trained on the same 59 FlowFeatures the agent extracts at
+runtime and saved in the format SOCAgent(model_path=...) loads.
+
+Examples:
+    # From benign packet captures (recommended: features match live traffic)
+    python scripts/train_model.py --pcap benign-monday.pcap --output models/model.joblib
+
+    # From a CSV whose columns are the FlowFeatures names
+    python scripts/train_model.py --csv flows.csv --output models/model.joblib
 """
 
+import argparse
 import json
+import logging
 import os
 import sys
-import logging
-import argparse
-import numpy as np
-import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import IsolationForest
-import joblib
+from dataclasses import fields
+from typing import List
 
-# Add src to path
+import numpy as np
+from sklearn.model_selection import train_test_split
+
+# Make `src` importable when run as a script
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.detection_agent import MLDetectionModel
+from src.detection_agent import FlowFeatures, MLDetectionModel  # noqa: E402
+from src.packet_capture import PacketCapture  # noqa: E402
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("train_model")
 
-def load_data(file_path: str) -> pd.DataFrame:
+FEATURE_NAMES = [f.name for f in fields(FlowFeatures)]
+BENIGN_LABELS = {"benign", "normal", "0"}
+
+
+def load_pcaps(paths: List[str]) -> np.ndarray:
     """
-    Load training data from CSV file.
-    
+    Extract FlowFeatures from benign packet captures.
+
     Args:
-        file_path: Path to CSV file
-        
+        paths: pcap/pcapng files containing known-benign traffic
+
     Returns:
-        DataFrame with training data
+        Array of shape (n_flows, n_features)
     """
-    logger.info(f"Loading data from {file_path}")
-    try:
-        df = pd.read_csv(file_path)
-        logger.info(f"Loaded {len(df)} samples with {df.shape[1]} features")
-        return df
-    except Exception as e:
-        logger.error(f"Error loading data: {e}")
-        raise
+    rows = []
+    for path in paths:
+        before = len(rows)
+        for features, _, _ in PacketCapture().read_pcap(path):
+            rows.append(features.to_array()[0])
+        logger.info(f"Extracted {len(rows) - before} flows from {path}")
+    return np.array(rows, dtype=np.float64).reshape(-1, len(FEATURE_NAMES))
 
-def preprocess_data(df: pd.DataFrame) -> tuple:
+
+def load_csv(path: str) -> np.ndarray:
     """
-    Preprocess the training data.
-    
+    Load flows from a CSV with one column per FlowFeatures field.
+
+    If a 'label' column exists, only benign rows are kept, since the model
+    must learn what normal traffic looks like.
+
     Args:
-        df: Input DataFrame
-        
+        path: CSV file
+
     Returns:
-        Tuple of (X, y) where X is the feature matrix and y is the target
-    """
-    # Drop non-numeric columns and columns with too many missing values
-    df = df.select_dtypes(include=[np.number])
-    df = df.dropna(axis=1, thresh=0.8*len(df))
-    
-    # Fill remaining missing values with column mean
-    df = df.fillna(df.mean())
-    
-    # Separate features and target if 'label' column exists
-    if 'label' in df.columns:
-        X = df.drop(columns=['label'])
-        y = df['label']
-    else:
-        X = df
-        y = None
-    
-    return X, y
+        Array of shape (n_flows, n_features)
 
-def train_model(X: np.ndarray, contamination: float = 0.1) -> tuple:
+    Raises:
+        ValueError: If required feature columns are missing
     """
-    Train the Isolation Forest model.
-    
-    Args:
-        X: Feature matrix
-        contamination: Expected proportion of anomalies
-        
-    Returns:
-        Tuple of (model, scaler)
-    """
-    logger.info("Training model...")
-    
-    # Scale features
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    
-    # Train model
-    model = IsolationForest(
-        n_estimators=100,
-        contamination=contamination,
-        random_state=42,
-        n_jobs=-1,
-        verbose=1
-    )
-    model.fit(X_scaled)
-    
-    return model, scaler
+    import pandas as pd  # only needed for CSV input
 
-def evaluate_model(model, X_test: np.ndarray) -> dict:
+    df = pd.read_csv(path)
+    df.columns = [c.strip() for c in df.columns]
+
+    missing = [name for name in FEATURE_NAMES if name not in df.columns]
+    if missing:
+        raise ValueError(
+            f"{path} is missing {len(missing)} FlowFeatures columns "
+            f"(e.g. {', '.join(missing[:5])}). The CSV must use the agent's "
+            f"feature names; train from --pcap to extract them automatically."
+        )
+
+    if "label" in df.columns:
+        is_benign = df["label"].astype(str).str.strip().str.lower().isin(BENIGN_LABELS)
+        logger.info(f"Keeping {int(is_benign.sum())} benign of {len(df)} labeled rows")
+        df = df[is_benign]
+
+    X = df[FEATURE_NAMES].apply(pd.to_numeric, errors="coerce")
+    X = X.replace([np.inf, -np.inf], np.nan)
+    dropped = int(X.isna().any(axis=1).sum())
+    if dropped:
+        logger.warning(f"Dropping {dropped} rows with missing or non-numeric values")
+    return X.dropna().to_numpy(dtype=np.float64)
+
+
+def evaluate(model: MLDetectionModel, X_test: np.ndarray) -> dict:
     """
-    Evaluate the trained model.
-    
+    Score held-out benign flows.
+
+    On benign data, the anomaly rate should be close to the contamination
+    setting; a much higher rate means the model is too sensitive.
+
     Args:
-        model: Trained model
-        X_test: Test features
-        
+        model: Fitted model
+        X_test: Held-out benign flows
+
     Returns:
         Dictionary of evaluation metrics
     """
-    logger.info("Evaluating model...")
-    
-    # Get anomaly scores
-    scores = model.decision_function(X_test)
-    
-    # Calculate metrics
-    metrics = {
-        'avg_anomaly_score': float(np.mean(scores)),
-        'std_anomaly_score': float(np.std(scores)),
-        'min_score': float(np.min(scores)),
-        'max_score': float(np.max(scores))
+    scaled = model.scaler.transform(X_test)
+    scores = -model.model.score_samples(scaled)
+    predictions = model.model.predict(scaled)
+    return {
+        "test_samples": int(len(X_test)),
+        "false_positive_rate": float(np.mean(predictions == -1)),
+        "score_mean": float(np.mean(scores)),
+        "score_std": float(np.std(scores)),
+        "score_p95": float(np.percentile(scores, 95)),
+        "score_max": float(np.max(scores)),
     }
-    
-    logger.info(f"Evaluation metrics: {metrics}")
-    return metrics
 
-def save_model(model, scaler, output_dir: str, metrics: dict = None) -> str:
-    """
-    Save the trained model and scaler.
-    
-    Args:
-        model: Trained model
-        scaler: Fitted scaler
-        output_dir: Directory to save the model
-        metrics: Model evaluation metrics
-        
-    Returns:
-        Path to saved model
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Save model
-    model_path = os.path.join(output_dir, 'model.joblib')
-    joblib.dump(model, model_path)
-    
-    # Save scaler
-    scaler_path = os.path.join(output_dir, 'scaler.joblib')
-    joblib.dump(scaler, scaler_path)
-    
-    # Save metrics
-    if metrics:
-        metrics_path = os.path.join(output_dir, 'metrics.json')
-        with open(metrics_path, 'w') as f:
-            json.dump(metrics, f, indent=2)
-    
-    logger.info(f"Model saved to {model_path}")
-    return model_path
 
-def main():
-    parser = argparse.ArgumentParser(description='Train ML model for Network Security AI Agent')
-    parser.add_argument('--input', type=str, required=True,
-                        help='Path to input CSV file')
-    parser.add_argument('--output-dir', type=str, default='models',
-                        help='Directory to save the trained model')
-    parser.add_argument('--contamination', type=float, default=0.1,
-                        help='Expected proportion of anomalies in the data')
-    parser.add_argument('--test-size', type=float, default=0.2,
-                        help='Proportion of data to use for testing')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed for reproducibility')
-    
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Train the anomaly detection model on benign traffic"
+    )
+    source = parser.add_argument_group("training data (at least one)")
+    source.add_argument("--pcap", action="append", default=[],
+                        help="Benign pcap/pcapng file (repeatable)")
+    source.add_argument("--csv", help="CSV with one column per FlowFeatures field")
+    parser.add_argument("--output", default="models/model.joblib",
+                        help="Where to save the model (default: models/model.joblib)")
+    parser.add_argument("--contamination", type=float, default=0.1,
+                        help="Expected proportion of anomalies (default: 0.1)")
+    parser.add_argument("--test-size", type=float, default=0.2,
+                        help="Fraction of flows held out for evaluation (default: 0.2)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for the train/test split")
     args = parser.parse_args()
-    
-    # Set random seed
-    np.random.seed(args.seed)
-    
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+
+    if not args.pcap and not args.csv:
+        parser.error("provide at least one --pcap or --csv")
+    if not 0 < args.contamination <= 0.5:
+        parser.error("--contamination must be in (0, 0.5]")
+    if not 0 < args.test_size < 1:
+        parser.error("--test-size must be between 0 and 1")
+
     try:
-        # Load and preprocess data
-        df = load_data(args.input)
-        X, _ = preprocess_data(df)
-        
-        # Split data
+        parts = []
+        if args.pcap:
+            parts.append(load_pcaps(args.pcap))
+        if args.csv:
+            parts.append(load_csv(args.csv))
+        X = np.vstack(parts)
+
+        min_flows = 10
+        if len(X) < min_flows:
+            logger.error(f"Only {len(X)} flows found; need at least {min_flows} to train")
+            return 1
+
         X_train, X_test = train_test_split(
-            X, 
-            test_size=args.test_size,
-            random_state=args.seed
+            X, test_size=args.test_size, random_state=args.seed
         )
-        
-        # Train model
-        model, scaler = train_model(X_train, contamination=args.contamination)
-        
-        # Evaluate model
-        X_test_scaled = scaler.transform(X_test)
-        metrics = evaluate_model(model, X_test_scaled)
-        
-        # Save model
-        model_path = save_model(model, scaler, args.output_dir, metrics)
-        
-        logger.info("Training completed successfully!")
+        logger.info(f"Training on {len(X_train)} flows, evaluating on {len(X_test)}")
+
+        model = MLDetectionModel(contamination=args.contamination)
+        model.fit(X_train)
+
+        metrics = evaluate(model, X_test)
+        logger.info(f"Evaluation: {metrics}")
+
+        model.save(args.output)
+        metrics_path = os.path.splitext(args.output)[0] + ".metrics.json"
+        with open(metrics_path, "w") as f:
+            json.dump(metrics, f, indent=2)
+
+        logger.info(f"Done. Load it with SOCAgent(model_path={args.output!r})")
         return 0
-        
+
     except Exception as e:
-        logger.error(f"Error during training: {e}")
+        logger.error(f"Training failed: {e}")
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())
