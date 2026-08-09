@@ -365,6 +365,10 @@ class FlowFeatureExtractor:
         bwd_fin = flags_bwd.get("FIN", 0)
         fwd_ack = flags_fwd.get("ACK", 0)
         bwd_ack = flags_bwd.get("ACK", 0)
+        fwd_cwr = flags_fwd.get("CWR", 0)
+        bwd_cwr = flags_bwd.get("CWR", 0)
+        fwd_ece = flags_fwd.get("ECE", 0)
+        bwd_ece = flags_bwd.get("ECE", 0)
 
         # Ratio metrics
         down_up_ratio = total_bwd_length / total_fwd_length if total_fwd_length > 0 else 0
@@ -429,10 +433,10 @@ class FlowFeatureExtractor:
             bwd_syn_flags=bwd_syn,
             fwd_fin_flags=fwd_fin,
             bwd_fin_flags=bwd_fin,
-            fwd_cwr_flags=0,
-            bwd_cwr_flags=0,
-            fwd_ece_flags=0,
-            bwd_ece_flags=0,
+            fwd_cwr_flags=fwd_cwr,
+            bwd_cwr_flags=bwd_cwr,
+            fwd_ece_flags=fwd_ece,
+            bwd_ece_flags=bwd_ece,
             fwd_ack_flags=fwd_ack,
             bwd_ack_flags=bwd_ack,
             down_up_ratio=down_up_ratio,
@@ -502,6 +506,8 @@ class PacketCapture:
                 flags["RST"] = bool(tcp_layer.flags & 0x04)
                 flags["PSH"] = bool(tcp_layer.flags & 0x08)
                 flags["URG"] = bool(tcp_layer.flags & 0x20)
+                flags["ECE"] = bool(tcp_layer.flags & 0x40)
+                flags["CWR"] = bool(tcp_layer.flags & 0x80)
 
             elif packet.haslayer(UDP):
                 udp_layer = packet[UDP]
