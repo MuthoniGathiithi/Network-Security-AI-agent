@@ -41,6 +41,7 @@ class PacketMetadata:
     dst_port: int
     packet_length: int
     flags: Dict[str, bool]
+    tcp_window: Optional[int] = None  # TCP header window field; None for non-TCP
 
 
 class FlowAggregator:
@@ -75,6 +76,9 @@ class FlowAggregator:
             "first_timestamp": None,
             "last_timestamp": None,
             "closed": False,
+            # Window of the first TCP packet seen in each direction
+            "init_win_fwd": None,
+            "init_win_bwd": None,
         })
         self.timeout = timeout
         # Latest time seen, taken from packet timestamps so that pcap replay
@@ -198,6 +202,12 @@ class FlowAggregator:
             metadata.src_ip == flow["src_ip"]
             and metadata.src_port == flow["src_port"]
         )
+
+        # Record the first TCP window seen in each direction
+        if metadata.tcp_window is not None:
+            direction = "init_win_fwd" if is_forward else "init_win_bwd"
+            if flow[direction] is None:
+                flow[direction] = metadata.tcp_window
 
         # Add packet to appropriate direction
         if is_forward:
@@ -374,9 +384,12 @@ class FlowFeatureExtractor:
         down_up_ratio = total_bwd_length / total_fwd_length if total_fwd_length > 0 else 0
         avg_pkt_size = (total_fwd_length + total_bwd_length) / (total_fwd_packets + total_bwd_packets) if (total_fwd_packets + total_bwd_packets) > 0 else 0
 
-        # Window sizes (placeholder)
-        init_fwd_win = 65535
-        init_bwd_win = 65535
+        # Initial TCP window per direction; -1 means no TCP packet was seen
+        # in that direction (same convention as CICFlowMeter)
+        init_fwd_win = flow_data.get("init_win_fwd")
+        init_bwd_win = flow_data.get("init_win_bwd")
+        init_fwd_win = -1 if init_fwd_win is None else init_fwd_win
+        init_bwd_win = -1 if init_bwd_win is None else init_bwd_win
 
         # Active/Idle times (simplified)
         active_times = flow_iats if len(flow_iats) > 0 else [0]
@@ -490,6 +503,7 @@ class PacketCapture:
 
             # Extract ports and flags
             src_port = 0
+            tcp_window = None
             dst_port = 0
             flags = {
                 "SYN": False, "ACK": False, "FIN": False, "RST": False,
@@ -500,6 +514,7 @@ class PacketCapture:
                 tcp_layer = packet[TCP]
                 src_port = tcp_layer.sport
                 dst_port = tcp_layer.dport
+                tcp_window = tcp_layer.window
                 flags["SYN"] = bool(tcp_layer.flags & 0x02)
                 flags["ACK"] = bool(tcp_layer.flags & 0x10)
                 flags["FIN"] = bool(tcp_layer.flags & 0x01)
@@ -530,7 +545,8 @@ class PacketCapture:
                 src_port=src_port,
                 dst_port=dst_port,
                 packet_length=packet_length,
-                flags=flags
+                flags=flags,
+                tcp_window=tcp_window
             )
 
         except Exception as e:
