@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 import requests
 
+from src.threat import ThreatLevel
+
 logger = logging.getLogger(__name__)
 
 
@@ -606,23 +608,20 @@ class AlertManager:
             Status dictionary
         """
         try:
-            # Color based on threat level
-            color_map = {
-                "LOW": "#36a64f",
-                "MEDIUM": "#ff9900",
-                "HIGH": "#ff6600",
-                "CRITICAL": "#cc0000"
-            }
+            color = ThreatLevel.parse(threat_level).color
+        except ValueError:
+            color = "#808080"
 
+        try:
             payload = {
                 "attachments": [
                     {
-                        "color": color_map.get(threat_level, "#808080"),
+                        "color": color,
                         "title": title,
                         "fields": [
                             {
                                 "title": "Threat Level",
-                                "value": threat_level,
+                                "value": str(threat_level),
                                 "short": True
                             },
                             {
@@ -774,7 +773,9 @@ class ResponseAgent:
             List of ResponseActions executed
         """
         actions = []
-        threat_level = detection_result.get("threat_level", "MEDIUM")
+        threat_level = ThreatLevel.parse(
+            detection_result.get("threat_level"), default=ThreatLevel.MEDIUM
+        )
         raw_src_ip = detection_result.get("src_ip")
 
         try:
@@ -791,7 +792,7 @@ class ResponseAgent:
         logger.info(f"Executing response for {src_ip} (Level: {threat_level})")
 
         # CRITICAL: Block IP immediately (only if we know who to block)
-        if threat_level == "CRITICAL":
+        if threat_level == ThreatLevel.CRITICAL:
             if has_valid_ip:
                 block_action = self.ip_blocker.block_ip(src_ip, "both")
             else:
@@ -804,8 +805,8 @@ class ResponseAgent:
                 )
             actions.append(block_action)
 
-        # HIGH: Send alert
-        if threat_level in ("HIGH", "CRITICAL"):
+        # HIGH and above: Send alert
+        if threat_level >= ThreatLevel.HIGH:
             alert_action = self.alert_manager.send_alert(
                 title=f"Security Alert: {detection_result.get('attack_type', 'Unknown')}",
                 threat_level=threat_level,

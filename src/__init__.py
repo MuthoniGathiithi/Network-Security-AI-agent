@@ -20,6 +20,7 @@ _LAZY_EXPORTS = {
     "ResponseAgent": "src.response_agent",
     "PacketCapture": "src.packet_capture",
     "PcapReadError": "src.packet_capture",
+    "ThreatLevel": "src.threat",
 }
 
 __all__ = list(_LAZY_EXPORTS)
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from src.detection_agent import DetectionAgent, FlowFeatures
     from src.response_agent import ResponseAgent
     from src.packet_capture import PacketCapture, PcapReadError
+    from src.threat import ThreatLevel
 
 
 def __getattr__(name: str) -> Any:

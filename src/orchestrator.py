@@ -16,6 +16,7 @@ import numpy as np
 from src.detection_agent import DetectionAgent, FlowFeatures
 from src.response_agent import ResponseAgent
 from src.packet_capture import PacketCapture
+from src.threat import ThreatLevel
 
 logger = logging.getLogger(__name__)
 
@@ -151,11 +152,11 @@ class SOCAgent:
             # Perform detection
             detection = self.detection_agent.detect(features, src_ip, dst_ip)
 
-            if detection.threat_level != "LOW":
+            if detection.threat_level > ThreatLevel.LOW:
                 detections.append(detection)
                 self.stats["threats_detected"] += 1
 
-                if detection.threat_level == "CRITICAL":
+                if detection.threat_level == ThreatLevel.CRITICAL:
                     self.stats["critical_alerts"] += 1
 
                     if auto_block_critical:

@@ -24,6 +24,8 @@ import sklearn
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 
+from src.threat import ThreatLevel
+
 try:
     from crewai import Agent
     CREWAI_AVAILABLE = True
@@ -144,7 +146,7 @@ class DetectionResult:
     timestamp: str
     src_ip: str
     dst_ip: str
-    threat_level: str  # "LOW", "MEDIUM", "HIGH", "CRITICAL"
+    threat_level: ThreatLevel
     attack_type: str  # e.g., "DDoS", "Port Scan", "Data Exfiltration"
     confidence: float  # 0.0 - 1.0
     mitre_techniques: List[str]  # e.g., ["T1571", "T1041"]
@@ -525,20 +527,20 @@ class DetectionAgent:
 
         # 3. Determine threat level
         if not is_anomaly:
-            threat_level = "LOW"
+            threat_level = ThreatLevel.LOW
             confidence = 0.1
         else:
             if ml_score > 0.8:
-                threat_level = "CRITICAL"
+                threat_level = ThreatLevel.CRITICAL
                 confidence = 0.95
             elif ml_score > 0.6:
-                threat_level = "HIGH"
+                threat_level = ThreatLevel.HIGH
                 confidence = 0.85
             elif ml_score > 0.4:
-                threat_level = "MEDIUM"
+                threat_level = ThreatLevel.MEDIUM
                 confidence = 0.70
             else:
-                threat_level = "LOW"
+                threat_level = ThreatLevel.LOW
                 confidence = 0.50
 
         # 4. Map to MITRE ATT&CK
