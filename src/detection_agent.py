@@ -13,8 +13,9 @@ import logging
 import os
 import stat
 import tempfile
-from collections import deque
-from typing import Any, Deque, Dict, List, Optional
+import time
+from collections import OrderedDict, deque
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, fields
 
@@ -333,6 +334,102 @@ class MLDetectionModel:
         return int(prediction), float(score)
 
 
+@dataclass
+class ScanFinding:
+    """A port scan or host sweep observed across multiple flows."""
+    kind: str  # "vertical" (many ports, one host) or "horizontal" (one port, many hosts)
+    targets: int  # distinct ports (vertical) or hosts (horizontal) probed
+    window_seconds: float
+
+    def describe(self) -> str:
+        what = "ports on one host" if self.kind == "vertical" else "hosts on one port"
+        return (
+            f"Source sent failed probes to {self.targets} distinct {what} "
+            f"within {self.window_seconds:.0f}s ({self.kind} scan)."
+        )
+
+
+class PortScanTracker:
+    """
+    Detects port scans across flows.
+
+    A single flow can't reveal a scan; a scan is many short flows from one
+    source. Only failed probes count (few packets, and no reply or an RST
+    back), so normal clients talking to many servers on :443 don't trigger it.
+    """
+
+    def __init__(
+        self,
+        window_seconds: float = 60.0,
+        threshold: int = 15,
+        max_sources: int = 10_000,
+        clock: Callable[[], float] = time.monotonic
+    ):
+        """
+        Args:
+            window_seconds: Sliding window for counting probes
+            threshold: Distinct ports (or hosts) that constitute a scan
+            max_sources: Sources tracked at once; least recently seen are
+                evicted, bounding memory under spoofed-source floods
+            clock: Time source (injectable for tests)
+        """
+        self.window_seconds = window_seconds
+        self.threshold = threshold
+        self.max_sources = max_sources
+        self.clock = clock
+        # src_ip -> deque of (time, dst_ip, dst_port)
+        self._probes: "OrderedDict[str, Deque[Tuple[float, str, int]]]" = OrderedDict()
+
+    @staticmethod
+    def is_probe(features: "FlowFeatures") -> bool:
+        """A short flow that got no reply or was refused with RST."""
+        return (
+            features.total_fwd_packets <= 3
+            and (features.total_bwd_packets == 0 or features.bwd_rst_flags > 0)
+        )
+
+    def observe(
+        self,
+        src_ip: str,
+        dst_ip: str,
+        features: "FlowFeatures"
+    ) -> Optional[ScanFinding]:
+        """
+        Record a flow and report a scan if the source crossed the threshold.
+
+        Args:
+            src_ip: Flow initiator
+            dst_ip: Flow responder
+            features: Flow features
+
+        Returns:
+            ScanFinding if this source is scanning, else None
+        """
+        if not self.is_probe(features):
+            return None
+
+        now = self.clock()
+        probes = self._probes.pop(src_ip, None) or deque()
+        probes.append((now, dst_ip, features.dst_port))
+        while probes and now - probes[0][0] > self.window_seconds:
+            probes.popleft()
+        self._probes[src_ip] = probes  # re-insert as most recently seen
+        if len(self._probes) > self.max_sources:
+            self._probes.popitem(last=False)
+
+        ports_on_this_host = {port for _, dst, port in probes if dst == dst_ip}
+        if len(ports_on_this_host) >= self.threshold:
+            return ScanFinding("vertical", len(ports_on_this_host), self.window_seconds)
+
+        hosts_on_this_port = {
+            dst for _, dst, port in probes if port == features.dst_port
+        }
+        if len(hosts_on_this_port) >= self.threshold:
+            return ScanFinding("horizontal", len(hosts_on_this_port), self.window_seconds)
+
+        return None
+
+
 class MitreAttackRAG:
     """
     Retrieval-Augmented Generation over MITRE ATT&CK framework.
@@ -430,6 +527,7 @@ class DetectionAgent:
         else:
             self.ml_model = MLDetectionModel()
         self.mitre_rag = MitreAttackRAG()
+        self.scan_tracker = PortScanTracker()
         self.detection_history: Deque[DetectionResult] = deque(maxlen=max_history)
 
         self.ml_analyst = None
@@ -522,8 +620,10 @@ class DetectionAgent:
         prediction, ml_score = self.ml_model.predict(features_array)
         is_anomaly = prediction == -1
 
-        # 2. Heuristic-based attack type classification
-        attack_type = self._classify_attack_type(flow_features)
+        # 2. Attack type: cross-flow scan detection first, then single-flow
+        # heuristics
+        scan = self.scan_tracker.observe(src_ip, dst_ip, flow_features)
+        attack_type = "Port Scan" if scan else self._classify_attack_type(flow_features)
 
         # 3. Determine threat level
         if not is_anomaly:
@@ -543,13 +643,23 @@ class DetectionAgent:
                 threat_level = ThreatLevel.LOW
                 confidence = 0.50
 
+        # Individual scan probes look harmless to the ML model, so a scan
+        # seen across flows raises the level on its own. HIGH alerts but
+        # doesn't auto-block: scans are reconnaissance and often spoofed.
+        if scan:
+            threat_level = max(threat_level, ThreatLevel.HIGH)
+            confidence = max(confidence, min(0.95, 0.6 + 0.01 * scan.targets))
+
         # 4. Map to MITRE ATT&CK
         mitre_info = self.mitre_rag.map_attack_type(attack_type)
 
         # 5. Generate AI reasoning
         reasoning = self._generate_reasoning(
-            flow_features, ml_score, is_anomaly, attack_type, mitre_info
+            flow_features, ml_score, is_anomaly, attack_type, mitre_info,
+            confirmed_by_heuristics=scan is not None
         )
+        if scan:
+            reasoning = f"{scan.describe()} {reasoning}"
 
         # 6. Create detection result
         result = DetectionResult(
@@ -583,11 +693,8 @@ class DetectionAgent:
         Returns:
             Attack type string
         """
-        # Port scanning: many packets to different ports, short duration
-        if (features.total_fwd_packets > 20 and
-            features.fwd_packet_length_mean < 100 and
-            features.flow_duration < 5):
-            return "Port Scan"
+        # Port scans span many flows and are detected by PortScanTracker,
+        # not by looking at one flow
 
         # DDoS: high packet volume, many connections
         if (features.total_fwd_packets > 1000 or
@@ -618,7 +725,8 @@ class DetectionAgent:
         ml_score: float,
         is_anomaly: bool,
         attack_type: str,
-        mitre_info: Dict[str, Any]
+        mitre_info: Dict[str, Any],
+        confirmed_by_heuristics: bool = False
     ) -> str:
         """
         Generate human-readable reasoning for the detection.
@@ -629,6 +737,8 @@ class DetectionAgent:
             is_anomaly: Whether the ML model classified the flow as anomalous
             attack_type: Classified attack type
             mitre_info: MITRE ATT&CK mapping
+            confirmed_by_heuristics: True when cross-flow evidence (e.g. a
+                port scan) confirms the attack even without an ML anomaly
 
         Returns:
             Reasoning string
@@ -673,7 +783,7 @@ class DetectionAgent:
 
         # MITRE mapping
         techniques_str = ", ".join(mitre_info["techniques"])
-        if is_anomaly:
+        if is_anomaly or confirmed_by_heuristics:
             reasoning_parts.append(
                 f"Behavior maps to MITRE ATT&CK techniques: {techniques_str} "
                 f"({mitre_info['description']})."
