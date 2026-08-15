@@ -180,11 +180,13 @@ class MLDetectionModel:
         self.n_features: Optional[int] = None
         self.n_samples: Optional[int] = None
         self.trained_at: Optional[str] = None
+        # Anomaly-score cut-offs per level, calibrated on benign traffic
+        self.thresholds: Optional[Dict[ThreatLevel, float]] = None
         self._warned_unfitted = False
         logger.info("MLDetectionModel initialized with Isolation Forest")
 
     # Bump when the saved bundle layout changes
-    MODEL_FORMAT_VERSION = 1
+    MODEL_FORMAT_VERSION = 2  # v2 adds calibrated thresholds
 
     def save(self, path: str) -> None:
         """
@@ -209,6 +211,7 @@ class MLDetectionModel:
             "n_samples": self.n_samples,
             "trained_at": self.trained_at,
             "sklearn_version": sklearn.__version__,
+            "thresholds": {level.value: t for level, t in self.thresholds.items()},
         }
 
         directory = os.path.dirname(os.path.abspath(path))
@@ -256,6 +259,13 @@ class MLDetectionModel:
 
         bundle = joblib.load(path)
 
+        version = bundle.get("format_version") if isinstance(bundle, dict) else None
+        if isinstance(version, int) and version != cls.MODEL_FORMAT_VERSION:
+            raise ValueError(
+                f"{path} uses model format v{version}, but this version of the "
+                f"agent needs v{cls.MODEL_FORMAT_VERSION}; retrain with "
+                f"scripts/train_model.py"
+            )
         if (not isinstance(bundle, dict)
                 or bundle.get("format_version") != cls.MODEL_FORMAT_VERSION
                 or not isinstance(bundle.get("model"), IsolationForest)
@@ -277,6 +287,9 @@ class MLDetectionModel:
         instance.n_features = bundle["n_features"]
         instance.n_samples = bundle.get("n_samples")
         instance.trained_at = bundle.get("trained_at")
+        instance.thresholds = {
+            ThreatLevel(level): float(t) for level, t in bundle["thresholds"].items()
+        }
         instance.is_fitted = True
         logger.info(
             f"Model loaded from {path} (trained {instance.trained_at} "
@@ -297,10 +310,48 @@ class MLDetectionModel:
             self.is_fitted = True
             self.n_samples, self.n_features = features.shape
             self.trained_at = datetime.now(timezone.utc).isoformat()
+            self.calibrate(features)
             logger.info(f"Model trained on {len(features)} samples")
         except Exception as e:
             logger.error(f"Model training failed: {e}")
             raise
+
+    def calibrate(self, benign_features: np.ndarray) -> Dict[ThreatLevel, float]:
+        """
+        Set threat thresholds from the scores of known-benign flows.
+
+        IsolationForest.predict() flags a fixed share of training data
+        (`contamination`, 10% by default) as anomalous, which means 1 in 10
+        benign flows would raise an alert. Thresholds derived from the
+        benign score distribution are far more conservative:
+
+            MEDIUM   > 99th percentile of benign scores (~1% of benign)
+            HIGH     > highest benign score
+            CRITICAL > highest benign score + 2 standard deviations
+
+        Args:
+            benign_features: Benign flows, shape (n_samples, n_features)
+
+        Returns:
+            The thresholds that were set
+        """
+        scores = -self.model.score_samples(self.scaler.transform(benign_features))
+        p99, top, spread = np.percentile(scores, 99), scores.max(), scores.std()
+        # Keep levels strictly increasing even if scores are nearly identical
+        gap = max(spread, 1e-3)
+        medium = float(p99)
+        high = float(max(top, medium + gap * 0.5))
+        critical = float(high + 2 * gap)
+        self.thresholds = {
+            ThreatLevel.MEDIUM: medium,
+            ThreatLevel.HIGH: high,
+            ThreatLevel.CRITICAL: critical,
+        }
+        logger.info(
+            "Calibrated thresholds: "
+            + ", ".join(f"{lvl.value}>{t:.3f}" for lvl, t in self.thresholds.items())
+        )
+        return self.thresholds
 
     def predict(self, features: np.ndarray) -> tuple[int, float]:
         """
@@ -311,7 +362,7 @@ class MLDetectionModel:
 
         Returns:
             Tuple of (prediction, anomaly_score)
-            prediction: -1 for anomaly, 1 for normal
+            prediction: -1 if the score is above the MEDIUM threshold, else 1
             anomaly_score: Raw anomaly score (higher = more anomalous)
 
         Raises:
@@ -329,9 +380,9 @@ class MLDetectionModel:
             return 1, 0.0
 
         scaled = self.scaler.transform(features)
-        prediction = self.model.predict(scaled)[0]
-        score = -self.model.score_samples(scaled)[0]  # Negate for intuitive scale
-        return int(prediction), float(score)
+        score = float(-self.model.score_samples(scaled)[0])  # Negate: higher = more anomalous
+        prediction = -1 if score > self.thresholds[ThreatLevel.MEDIUM] else 1
+        return prediction, score
 
 
 @dataclass
@@ -499,7 +550,8 @@ class DetectionAgent:
         self,
         model_path: Optional[str] = None,
         max_history: int = DEFAULT_MAX_HISTORY,
-        enable_crew: bool = False
+        enable_crew: bool = False,
+        thresholds: Optional[Dict[str, float]] = None
     ):
         """
         Initialize the Detection Agent.
@@ -512,6 +564,8 @@ class DetectionAgent:
             enable_crew: Set up CrewAI analyst agents. Off by default: they
                 need the crewai package and an LLM API key, and detection
                 doesn't depend on them.
+            thresholds: Override calibrated anomaly-score thresholds, e.g.
+                {"CRITICAL": 0.75}. Unspecified levels keep calibrated values.
         """
         if max_history < 1:
             raise ValueError("max_history must be at least 1")
@@ -528,6 +582,10 @@ class DetectionAgent:
             self.ml_model = MLDetectionModel()
         self.mitre_rag = MitreAttackRAG()
         self.scan_tracker = PortScanTracker()
+        self.threshold_overrides = {
+            ThreatLevel.parse(level): float(value)
+            for level, value in (thresholds or {}).items()
+        }
         self.detection_history: Deque[DetectionResult] = deque(maxlen=max_history)
 
         self.ml_analyst = None
@@ -617,31 +675,17 @@ class DetectionAgent:
         """
         # 1. ML-based anomaly detection
         features_array = flow_features.to_array()
-        prediction, ml_score = self.ml_model.predict(features_array)
-        is_anomaly = prediction == -1
+        _, ml_score = self.ml_model.predict(features_array)
 
         # 2. Attack type: cross-flow scan detection first, then single-flow
         # heuristics
         scan = self.scan_tracker.observe(src_ip, dst_ip, flow_features)
         attack_type = "Port Scan" if scan else self._classify_attack_type(flow_features)
 
-        # 3. Determine threat level
-        if not is_anomaly:
-            threat_level = ThreatLevel.LOW
-            confidence = 0.1
-        else:
-            if ml_score > 0.8:
-                threat_level = ThreatLevel.CRITICAL
-                confidence = 0.95
-            elif ml_score > 0.6:
-                threat_level = ThreatLevel.HIGH
-                confidence = 0.85
-            elif ml_score > 0.4:
-                threat_level = ThreatLevel.MEDIUM
-                confidence = 0.70
-            else:
-                threat_level = ThreatLevel.LOW
-                confidence = 0.50
+        # 3. Determine threat level from calibrated thresholds
+        threat_level = self.level_for_score(ml_score)
+        is_anomaly = threat_level > ThreatLevel.LOW
+        confidence = self.CONFIDENCE[threat_level]
 
         # Individual scan probes look harmless to the ML model, so a scan
         # seen across flows raises the level on its own. HIGH alerts but
@@ -682,6 +726,37 @@ class DetectionAgent:
         )
 
         return result
+
+    # Confidence reported for each ML-derived level
+    CONFIDENCE = {
+        ThreatLevel.LOW: 0.10,
+        ThreatLevel.MEDIUM: 0.60,
+        ThreatLevel.HIGH: 0.80,
+        ThreatLevel.CRITICAL: 0.95,
+    }
+
+    @property
+    def thresholds(self) -> Dict[ThreatLevel, float]:
+        """Effective thresholds: calibrated values plus any overrides."""
+        return {**(self.ml_model.thresholds or {}), **self.threshold_overrides}
+
+    def level_for_score(self, ml_score: float) -> ThreatLevel:
+        """
+        Map an anomaly score to a threat level.
+
+        Args:
+            ml_score: Anomaly score from the ML model
+
+        Returns:
+            The highest level whose threshold the score exceeds
+        """
+        if not self.ml_model.is_fitted:
+            return ThreatLevel.LOW
+        thresholds = self.thresholds
+        for level in (ThreatLevel.CRITICAL, ThreatLevel.HIGH, ThreatLevel.MEDIUM):
+            if level in thresholds and ml_score > thresholds[level]:
+                return level
+        return ThreatLevel.LOW
 
     def _classify_attack_type(self, features: FlowFeatures) -> str:
         """
@@ -754,14 +829,15 @@ class DetectionAgent:
             reasoning_parts.append(
                 f"ML model rated this flow as normal (score: {ml_score:.2f})."
             )
-        elif ml_score > 0.6:
-            reasoning_parts.append(
-                f"ML model flagged as anomalous (score: {ml_score:.2f}). "
-                f"Pattern significantly deviates from benign traffic."
-            )
         else:
+            level = self.level_for_score(ml_score)
             reasoning_parts.append(
-                f"ML model detected subtle anomaly (score: {ml_score:.2f})."
+                f"ML model flagged as anomalous (score: {ml_score:.2f}, above "
+                f"the {level.value} threshold of {self.thresholds[level]:.2f}). "
+                f"Pattern deviates from all benign training traffic."
+                if level >= ThreatLevel.HIGH else
+                f"ML model detected a subtle anomaly (score: {ml_score:.2f}, "
+                f"above the benign 99th percentile of {self.thresholds[level]:.2f})."
             )
 
         # Behavioral analysis

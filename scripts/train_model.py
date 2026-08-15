@@ -29,6 +29,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.detection_agent import FlowFeatures, MLDetectionModel  # noqa: E402
 from src.packet_capture import PacketCapture  # noqa: E402
+from src.threat import ThreatLevel  # noqa: E402
 
 logger = logging.getLogger("train_model")
 
@@ -99,10 +100,11 @@ def load_csv(path: str) -> np.ndarray:
 
 def evaluate(model: MLDetectionModel, X_test: np.ndarray) -> dict:
     """
-    Score held-out benign flows.
+    Score held-out benign flows against the calibrated thresholds.
 
-    On benign data, the anomaly rate should be close to the contamination
-    setting; a much higher rate means the model is too sensitive.
+    On benign data, the MEDIUM rate should be around 1% and HIGH/CRITICAL
+    close to 0%; much higher rates mean the training data didn't cover
+    normal traffic well.
 
     Args:
         model: Fitted model
@@ -113,10 +115,13 @@ def evaluate(model: MLDetectionModel, X_test: np.ndarray) -> dict:
     """
     scaled = model.scaler.transform(X_test)
     scores = -model.model.score_samples(scaled)
-    predictions = model.model.predict(scaled)
+    t = model.thresholds
     return {
         "test_samples": int(len(X_test)),
-        "false_positive_rate": float(np.mean(predictions == -1)),
+        "thresholds": {level.value: value for level, value in t.items()},
+        "false_positive_rate": float(np.mean(scores > t[ThreatLevel.MEDIUM])),
+        "high_or_above_rate": float(np.mean(scores > t[ThreatLevel.HIGH])),
+        "critical_rate": float(np.mean(scores > t[ThreatLevel.CRITICAL])),
         "score_mean": float(np.mean(scores)),
         "score_std": float(np.std(scores)),
         "score_p95": float(np.percentile(scores, 95)),
