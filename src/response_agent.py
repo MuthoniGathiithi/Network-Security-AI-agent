@@ -18,8 +18,9 @@ import subprocess
 import os
 import tempfile
 import threading
-from collections import deque
-from typing import Any, Deque, Dict, Iterable, List, Optional, Union
+import time
+from collections import OrderedDict, deque
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple, Union
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -713,6 +714,72 @@ class AlertManager:
             return {"status": "error", "error": error}
 
 
+class AlertThrottle:
+    """
+    Suppresses repeat alerts for the same source and attack type.
+
+    A scanner sending 40 probes would otherwise produce 40 Slack messages.
+    Within the cooldown, repeats are suppressed and counted; the next alert
+    after the cooldown reports how many were suppressed. An escalation
+    (e.g. HIGH -> CRITICAL) always alerts immediately.
+    """
+
+    def __init__(
+        self,
+        cooldown_seconds: float = 300.0,
+        max_keys: int = 10_000,
+        clock: Callable[[], float] = time.monotonic
+    ):
+        """
+        Args:
+            cooldown_seconds: Minimum seconds between alerts per key;
+                0 disables throttling
+            max_keys: Keys remembered at once (least recent evicted)
+            clock: Time source (injectable for tests)
+        """
+        self.cooldown_seconds = cooldown_seconds
+        self.max_keys = max_keys
+        self.clock = clock
+        # (src_ip, attack_type) -> [last_alert_time, last_level, suppressed_count]
+        self._state: "OrderedDict[Tuple[str, str], List[Any]]" = OrderedDict()
+        self._lock = threading.Lock()
+
+    def check(self, src_ip: str, attack_type: str, level: ThreatLevel) -> Tuple[bool, int]:
+        """
+        Decide whether to send an alert, and record the decision.
+
+        Args:
+            src_ip: Detection source IP
+            attack_type: Detection attack type
+            level: Detection threat level
+
+        Returns:
+            (should_send, suppressed_count) where suppressed_count is the
+            number of alerts suppressed since the last one sent (only
+            meaningful when should_send is True)
+        """
+        if self.cooldown_seconds <= 0:
+            return True, 0
+
+        key = (src_ip, attack_type)
+        now = self.clock()
+        with self._lock:
+            state = self._state.pop(key, None)
+            if state is not None:
+                last_time, last_level, suppressed = state
+                in_cooldown = now - last_time < self.cooldown_seconds
+                if in_cooldown and level <= last_level:
+                    self._state[key] = [last_time, last_level, suppressed + 1]
+                    return False, suppressed
+            else:
+                suppressed = 0
+
+            self._state[key] = [now, level, 0]
+            if len(self._state) > self.max_keys:
+                self._state.popitem(last=False)
+            return True, suppressed
+
+
 class ResponseAgent:
     """
     Main Response Agent coordinating automated security responses.
@@ -727,7 +794,8 @@ class ResponseAgent:
         webhook_urls: Optional[List[str]] = None,
         allowlist: Optional[Iterable[str]] = None,
         blocklist_file: Optional[str] = None,
-        max_history: int = DEFAULT_MAX_HISTORY
+        max_history: int = DEFAULT_MAX_HISTORY,
+        alert_cooldown_seconds: float = 300.0
     ):
         """
         Initialize Response Agent.
@@ -740,6 +808,8 @@ class ResponseAgent:
             blocklist_file: Path to the blocklist file
             max_history: Maximum response actions kept in memory; oldest
                 are dropped first
+            alert_cooldown_seconds: Minimum seconds between alerts for the
+                same source and attack type (0 disables throttling)
         """
         if max_history < 1:
             raise ValueError("max_history must be at least 1")
@@ -754,6 +824,7 @@ class ResponseAgent:
             webhook_urls=webhook_urls,
             dry_run=dry_run
         )
+        self.alert_throttle = AlertThrottle(cooldown_seconds=alert_cooldown_seconds)
         self.action_history: Deque[ResponseAction] = deque(maxlen=max_history)
         self.dry_run = dry_run
 
@@ -805,13 +876,32 @@ class ResponseAgent:
                 )
             actions.append(block_action)
 
-        # HIGH and above: Send alert
+        # HIGH and above: Send alert (throttled per source + attack type)
         if threat_level >= ThreatLevel.HIGH:
-            alert_action = self.alert_manager.send_alert(
-                title=f"Security Alert: {detection_result.get('attack_type', 'Unknown')}",
-                threat_level=threat_level,
-                details=detection_result
+            attack_type = detection_result.get("attack_type", "Unknown")
+            should_send, suppressed = self.alert_throttle.check(
+                src_ip, attack_type, threat_level
             )
+            if should_send:
+                title = f"Security Alert: {attack_type}"
+                if suppressed:
+                    title += f" (+{suppressed} similar alerts suppressed)"
+                alert_action = self.alert_manager.send_alert(
+                    title=title,
+                    threat_level=threat_level,
+                    details=detection_result
+                )
+            else:
+                alert_action = ResponseAction(
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    action_type="ALERT",
+                    target=src_ip,
+                    status="SKIPPED",
+                    details={
+                        "message": "Suppressed by alert cooldown",
+                        "cooldown_seconds": self.alert_throttle.cooldown_seconds,
+                    }
+                )
             actions.append(alert_action)
 
         # All levels: Log

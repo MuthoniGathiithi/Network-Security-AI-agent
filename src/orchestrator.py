@@ -56,7 +56,8 @@ class SOCAgent:
         webhook_urls: Optional[List[str]] = None,
         model_path: Optional[str] = None,
         allowlist: Optional[List[str]] = None,
-        blocklist_file: Optional[str] = None
+        blocklist_file: Optional[str] = None,
+        alert_cooldown_seconds: float = 300.0
     ):
         """
         Initialize the SOC Agent.
@@ -68,6 +69,8 @@ class SOCAgent:
             model_path: Path to a model saved with save_model(); skips retraining
             allowlist: IPs or CIDR ranges that must never be blocked
             blocklist_file: Path to the blocklist file
+            alert_cooldown_seconds: Minimum seconds between alerts for the
+                same source and attack type (0 disables throttling)
         """
         self.detection_agent = DetectionAgent(model_path=model_path)
         self.response_agent = ResponseAgent(
@@ -75,7 +78,8 @@ class SOCAgent:
             slack_webhook=slack_webhook,
             webhook_urls=webhook_urls,
             allowlist=allowlist,
-            blocklist_file=blocklist_file
+            blocklist_file=blocklist_file,
+            alert_cooldown_seconds=alert_cooldown_seconds
         )
         self.packet_capture = PacketCapture()
 
