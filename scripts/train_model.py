@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import sys
-from dataclasses import fields
 from typing import List
 
 import numpy as np
@@ -33,7 +32,7 @@ from src.threat import ThreatLevel  # noqa: E402
 
 logger = logging.getLogger("train_model")
 
-FEATURE_NAMES = [f.name for f in fields(FlowFeatures)]
+FEATURE_NAMES = FlowFeatures.feature_names()
 BENIGN_LABELS = {"benign", "normal", "0"}
 
 
@@ -178,7 +177,7 @@ def main() -> int:
         logger.info(f"Training on {len(X_train)} flows, evaluating on {len(X_test)}")
 
         model = MLDetectionModel(contamination=args.contamination)
-        model.fit(X_train)
+        model.fit(X_train, feature_names=FEATURE_NAMES)
 
         metrics = evaluate(model, X_test)
         logger.info(f"Evaluation: {metrics}")

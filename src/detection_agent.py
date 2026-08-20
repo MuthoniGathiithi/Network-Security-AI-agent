@@ -113,31 +113,19 @@ class FlowFeatures:
         for f in fields(self):
             setattr(self, f.name, f.type(getattr(self, f.name)))
 
+    @classmethod
+    def feature_names(cls) -> List[str]:
+        """
+        Feature names in model input order (the dataclass field order).
+
+        This is the single source of truth for column order: to_array(),
+        training, saved models and CSV input all use it.
+        """
+        return [f.name for f in fields(cls)]
+
     def to_array(self) -> np.ndarray:
-        """Convert all features to a 1D numpy array for ML model input."""
-        values = [
-            self.duration, self.protocol, self.src_port, self.dst_port,
-            self.flow_duration, self.total_fwd_packets, self.total_bwd_packets,
-            self.total_length_of_fwd_packets, self.total_length_of_bwd_packets,
-            self.fwd_packet_length_max, self.fwd_packet_length_min,
-            self.fwd_packet_length_mean, self.fwd_packet_length_std,
-            self.bwd_packet_length_max, self.bwd_packet_length_min,
-            self.bwd_packet_length_mean, self.bwd_packet_length_std,
-            self.flow_iat_mean, self.flow_iat_std, self.flow_iat_max,
-            self.flow_iat_min, self.fwd_iat_total, self.fwd_iat_mean,
-            self.fwd_iat_std, self.fwd_iat_max, self.fwd_iat_min,
-            self.bwd_iat_total, self.bwd_iat_mean, self.bwd_iat_std,
-            self.bwd_iat_max, self.bwd_iat_min, self.fwd_psh_flags,
-            self.bwd_psh_flags, self.fwd_urg_flags, self.bwd_urg_flags,
-            self.fwd_rst_flags, self.bwd_rst_flags, self.fwd_syn_flags,
-            self.bwd_syn_flags, self.fwd_fin_flags, self.bwd_fin_flags,
-            self.fwd_cwr_flags, self.bwd_cwr_flags, self.fwd_ece_flags,
-            self.bwd_ece_flags, self.fwd_ack_flags, self.bwd_ack_flags,
-            self.down_up_ratio, self.pkt_size_avg, self.init_fwd_win_byts,
-            self.init_bwd_win_byts, self.active_mean, self.active_std,
-            self.active_max, self.active_min, self.idle_mean, self.idle_std,
-            self.idle_max, self.idle_min
-        ]
+        """Convert all features to a (1, n_features) array for ML model input."""
+        values = [getattr(self, name) for name in self.feature_names()]
         return np.array(values, dtype=np.float32).reshape(1, -1)
 
 
@@ -178,6 +166,7 @@ class MLDetectionModel:
         self.scaler = StandardScaler()
         self.is_fitted = False
         self.n_features: Optional[int] = None
+        self.feature_names: Optional[List[str]] = None
         self.n_samples: Optional[int] = None
         self.trained_at: Optional[str] = None
         # Anomaly-score cut-offs per level, calibrated on benign traffic
@@ -208,6 +197,7 @@ class MLDetectionModel:
             "model": self.model,
             "scaler": self.scaler,
             "n_features": self.n_features,
+            "feature_names": self.feature_names,
             "n_samples": self.n_samples,
             "trained_at": self.trained_at,
             "sklearn_version": sklearn.__version__,
@@ -285,6 +275,7 @@ class MLDetectionModel:
         instance.model = bundle["model"]
         instance.scaler = bundle["scaler"]
         instance.n_features = bundle["n_features"]
+        instance.feature_names = bundle.get("feature_names")
         instance.n_samples = bundle.get("n_samples")
         instance.trained_at = bundle.get("trained_at")
         instance.thresholds = {
@@ -297,18 +288,25 @@ class MLDetectionModel:
         )
         return instance
 
-    def fit(self, features: np.ndarray) -> None:
+    def fit(
+        self,
+        features: np.ndarray,
+        feature_names: Optional[List[str]] = None
+    ) -> None:
         """
         Train the model on benign network flow data.
 
         Args:
             features: Array of shape (n_samples, n_features)
+            feature_names: Column names, saved with the model so a column
+                order mismatch is caught when it's loaded
         """
         try:
             scaled_features = self.scaler.fit_transform(features)
             self.model.fit(scaled_features)
             self.is_fitted = True
             self.n_samples, self.n_features = features.shape
+            self.feature_names = list(feature_names) if feature_names else None
             self.trained_at = datetime.now(timezone.utc).isoformat()
             self.calibrate(features)
             logger.info(f"Model trained on {len(features)} samples")
@@ -572,11 +570,16 @@ class DetectionAgent:
 
         if model_path:
             self.ml_model = MLDetectionModel.load(model_path)
-            expected = len(fields(FlowFeatures))
-            if self.ml_model.n_features != expected:
+            expected = FlowFeatures.feature_names()
+            if self.ml_model.n_features != len(expected):
                 raise ValueError(
                     f"Model at {model_path} expects {self.ml_model.n_features} "
-                    f"features but FlowFeatures has {expected}; retrain it"
+                    f"features but FlowFeatures has {len(expected)}; retrain it"
+                )
+            if self.ml_model.feature_names and self.ml_model.feature_names != expected:
+                raise ValueError(
+                    f"Model at {model_path} was trained on a different feature "
+                    f"order than FlowFeatures; retrain it"
                 )
         else:
             self.ml_model = MLDetectionModel()
@@ -638,13 +641,13 @@ class DetectionAgent:
         Raises:
             ValueError: If the column count doesn't match FlowFeatures
         """
-        expected = len(fields(FlowFeatures))
+        expected = len(FlowFeatures.feature_names())
         if training_data.ndim != 2 or training_data.shape[1] != expected:
             raise ValueError(
                 f"Training data must have shape (n_samples, {expected}) to match "
                 f"FlowFeatures; got {training_data.shape}"
             )
-        self.ml_model.fit(training_data)
+        self.ml_model.fit(training_data, feature_names=FlowFeatures.feature_names())
         logger.info("Detection Agent ML model trained")
 
     def save_model(self, path: str) -> None:
@@ -894,7 +897,7 @@ if __name__ == "__main__":
 
     # Generate synthetic benign training data
     n_samples = 100
-    n_features = len(fields(FlowFeatures))
+    n_features = len(FlowFeatures.feature_names())
 
     np.random.seed(42)
     benign_data = np.random.randn(n_samples, n_features) * 0.5 + 0.1
