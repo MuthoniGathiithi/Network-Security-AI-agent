@@ -143,6 +143,23 @@ class DetectionResult:
     raw_features: Dict[str, Any]
     ml_score: float
 
+    def to_dict(self, include_features: bool = False) -> Dict[str, Any]:
+        """
+        JSON-ready representation used by exports, the API and responses.
+
+        Args:
+            include_features: Also include the 59 raw flow features (large;
+                useful for forensics and exports, not for lists)
+
+        Returns:
+            Dict with plain JSON types
+        """
+        data = asdict(self)
+        data["threat_level"] = self.threat_level.value
+        if not include_features:
+            del data["raw_features"]
+        return data
+
 
 class MLDetectionModel:
     """
@@ -877,8 +894,8 @@ class DetectionAgent:
         return " ".join(reasoning_parts)
 
     def get_alerts(self) -> List[Dict[str, Any]]:
-        """Return all detection alerts as JSON-serializable dicts."""
-        return [asdict(r) for r in self.detection_history]
+        """Return all detections as JSON-serializable dicts, with features."""
+        return [r.to_dict(include_features=True) for r in self.detection_history]
 
     def clear_history(self) -> None:
         """Clear detection history."""

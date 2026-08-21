@@ -40,6 +40,16 @@ class ResponseAction:
     status: str  # "SUCCESS", "PARTIAL", "FAILED", "SKIPPED", "PENDING"
     details: Dict[str, Any]
 
+    def to_dict(self) -> Dict[str, Any]:
+        """JSON-ready representation used by exports and the API."""
+        return {
+            "timestamp": self.timestamp,
+            "action_type": self.action_type,
+            "target": self.target,
+            "status": self.status,
+            "details": self.details,
+        }
+
 
 class IPBlockManager:
     """
@@ -919,16 +929,7 @@ class ResponseAgent:
 
     def get_action_history(self) -> List[Dict[str, Any]]:
         """Get all response actions as JSON-serializable dicts."""
-        return [
-            {
-                "timestamp": a.timestamp,
-                "action_type": a.action_type,
-                "target": a.target,
-                "status": a.status,
-                "details": a.details
-            }
-            for a in self.action_history
-        ]
+        return [a.to_dict() for a in self.action_history]
 
     def get_blocklist(self) -> List[str]:
         """Get current blocklist."""

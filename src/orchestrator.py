@@ -164,19 +164,11 @@ class SOCAgent:
                     self.stats["critical_alerts"] += 1
 
                     if auto_block_critical:
-                        # Execute response
-                        detection_dict = {
-                            "timestamp": detection.timestamp,
-                            "src_ip": detection.src_ip,
-                            "dst_ip": detection.dst_ip,
-                            "threat_level": detection.threat_level,
-                            "attack_type": detection.attack_type,
-                            "confidence": detection.confidence,
-                            "mitre_techniques": detection.mitre_techniques,
-                            "reasoning": detection.reasoning,
-                        }
-
-                        actions = self.response_agent.respond_to_detection(detection_dict)
+                        # Execute response (features kept for the local log;
+                        # AlertManager strips them before anything is sent)
+                        actions = self.response_agent.respond_to_detection(
+                            detection.to_dict(include_features=True)
+                        )
                         responses.extend(actions)
 
                         if any(a.action_type == "BLOCK_IP" and a.status == "SUCCESS" for a in actions):
@@ -188,30 +180,9 @@ class SOCAgent:
             "file": pcap_file,
             "flows_analyzed": flow_count,
             "threats_detected": len(detections),
-            "detections": [
-                {
-                    "timestamp": d.timestamp,
-                    "src_ip": d.src_ip,
-                    "dst_ip": d.dst_ip,
-                    "threat_level": d.threat_level,
-                    "attack_type": d.attack_type,
-                    "confidence": d.confidence,
-                    "mitre_techniques": d.mitre_techniques,
-                    "reasoning": d.reasoning,
-                    "ml_score": d.ml_score,
-                }
-                for d in detections
-            ],
-            "responses": [
-                {
-                    "timestamp": a.timestamp,
-                    "action_type": a.action_type,
-                    "target": a.target,
-                    "status": a.status,
-                }
-                for a in responses
-            ],
-            "stats": self.stats
+            "detections": [d.to_dict() for d in detections],
+            "responses": [a.to_dict() for a in responses],
+            "stats": dict(self.stats)
         }
 
     def get_dashboard_data(self) -> Dict[str, Any]:
@@ -222,18 +193,9 @@ class SOCAgent:
             Dictionary with all dashboard data
         """
         return {
-            "stats": self.stats,
+            "stats": dict(self.stats),
             "recent_detections": [
-                {
-                    "timestamp": d.timestamp,
-                    "src_ip": d.src_ip,
-                    "dst_ip": d.dst_ip,
-                    "threat_level": d.threat_level,
-                    "attack_type": d.attack_type,
-                    "confidence": d.confidence,
-                    "reasoning": d.reasoning,
-                }
-                for d in list(self.detection_agent.detection_history)[-50:]
+                d.to_dict() for d in list(self.detection_agent.detection_history)[-50:]
             ],
             "recent_responses": self.response_agent.get_action_history()[-50:],
             "blocklist": self.response_agent.get_blocklist()
