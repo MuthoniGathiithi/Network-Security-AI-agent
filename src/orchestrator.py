@@ -7,7 +7,7 @@ Provides API for real-time analysis and dashboard integration.
 
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import TYPE_CHECKING, Dict, Any, List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +17,9 @@ from src.detection_agent import DetectionAgent, FlowFeatures
 from src.response_agent import ResponseAgent
 from src.packet_capture import PacketCapture
 from src.threat import ThreatLevel
+
+if TYPE_CHECKING:
+    from src.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +60,9 @@ class SOCAgent:
         model_path: Optional[str] = None,
         allowlist: Optional[List[str]] = None,
         blocklist_file: Optional[str] = None,
-        alert_cooldown_seconds: float = 300.0
+        alert_cooldown_seconds: float = 300.0,
+        thresholds: Optional[Dict[str, float]] = None,
+        auto_block_critical: bool = False
     ):
         """
         Initialize the SOC Agent.
@@ -71,8 +76,11 @@ class SOCAgent:
             blocklist_file: Path to the blocklist file
             alert_cooldown_seconds: Minimum seconds between alerts for the
                 same source and attack type (0 disables throttling)
+            thresholds: Overrides for calibrated anomaly-score thresholds
+            auto_block_critical: Default for analyze_pcap(auto_block_critical=...)
         """
-        self.detection_agent = DetectionAgent(model_path=model_path)
+        self.auto_block_critical = auto_block_critical
+        self.detection_agent = DetectionAgent(model_path=model_path, thresholds=thresholds)
         self.response_agent = ResponseAgent(
             dry_run=dry_run,
             slack_webhook=slack_webhook,
@@ -93,6 +101,33 @@ class SOCAgent:
         }
 
         logger.info("SOC Agent initialized")
+
+    @classmethod
+    def from_settings(cls, settings: Optional["Settings"] = None) -> "SOCAgent":
+        """
+        Create an agent from Settings (environment variables / .env).
+
+        Args:
+            settings: Settings to use; loaded via load_settings() if None
+
+        Returns:
+            Configured SOCAgent
+        """
+        from src.config import load_settings
+
+        settings = settings or load_settings()
+        logger.info(f"Starting SOC Agent with settings: {settings.describe()}")
+        return cls(
+            dry_run=settings.dry_run,
+            slack_webhook=settings.slack_webhook,
+            webhook_urls=settings.webhook_urls,
+            model_path=settings.model_path,
+            allowlist=settings.allowlist,
+            blocklist_file=settings.blocklist_file,
+            alert_cooldown_seconds=settings.alert_cooldown_seconds,
+            thresholds=settings.thresholds,
+            auto_block_critical=settings.auto_block_critical,
+        )
 
     def train_on_benign_traffic(self, pcap_file: str) -> None:
         """
@@ -131,19 +166,22 @@ class SOCAgent:
     def analyze_pcap(
         self,
         pcap_file: str,
-        auto_block_critical: bool = False
+        auto_block_critical: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         Analyze a pcap file for threats.
 
         Args:
             pcap_file: Path to pcap file
-            auto_block_critical: If True, automatically block critical IPs
+            auto_block_critical: If True, automatically block critical IPs.
+                Defaults to the agent's auto_block_critical setting.
 
         Returns:
             Analysis results summary
         """
         logger.info(f"Analyzing pcap: {pcap_file}")
+        if auto_block_critical is None:
+            auto_block_critical = self.auto_block_critical
 
         detections = []
         responses = []

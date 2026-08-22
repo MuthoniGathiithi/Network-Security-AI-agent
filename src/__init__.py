@@ -21,6 +21,8 @@ _LAZY_EXPORTS = {
     "PacketCapture": "src.packet_capture",
     "PcapReadError": "src.packet_capture",
     "ThreatLevel": "src.threat",
+    "Settings": "src.config",
+    "load_settings": "src.config",
 }
 
 __all__ = list(_LAZY_EXPORTS)
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
     from src.response_agent import ResponseAgent
     from src.packet_capture import PacketCapture, PcapReadError
     from src.threat import ThreatLevel
+    from src.config import Settings, load_settings
 
 
 def __getattr__(name: str) -> Any:
