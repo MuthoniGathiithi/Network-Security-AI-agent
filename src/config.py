@@ -6,8 +6,10 @@ mode and never auto-blocks unless explicitly enabled. See .env.example for
 the full list.
 """
 
+import ipaddress
 import logging
 import os
+from urllib.parse import urlsplit
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Mapping, Optional, TypeVar
 
@@ -60,6 +62,50 @@ class Settings:
     api_host: str = "127.0.0.1"  # local only by default
     api_port: int = 8000
     max_upload_mb: int = 500
+    api_key: Optional[str] = None  # required unless bound to loopback
+    cors_origins: List[str] = field(default_factory=list)
+    cors_origin_regex: Optional[str] = None
+
+    MIN_API_KEY_LENGTH = 32
+
+    @property
+    def api_is_local_only(self) -> bool:
+        """True if the API binds to a loopback address only."""
+        if self.api_host == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(self.api_host).is_loopback
+        except ValueError:
+            return False
+
+    def validate_api_security(self) -> None:
+        """
+        Refuse insecure API configurations at startup.
+
+        Raises:
+            ValueError: If the API would be reachable without a key, the key
+                is too short, or a CORS origin is not a plain https origin
+        """
+        if self.api_key is None and not self.api_is_local_only:
+            raise ValueError(
+                f"SOC_API_HOST={self.api_host} accepts remote connections but "
+                f"SOC_API_KEY is not set. Set an API key (e.g. "
+                f"`python -c \"import secrets; print(secrets.token_urlsafe(32))\"`) "
+                f"or bind to 127.0.0.1."
+            )
+        if self.api_key is not None and len(self.api_key) < self.MIN_API_KEY_LENGTH:
+            raise ValueError(
+                f"SOC_API_KEY must be at least {self.MIN_API_KEY_LENGTH} characters"
+            )
+        for origin in self.cors_origins:
+            parts = urlsplit(origin)
+            local = parts.hostname in ("localhost", "127.0.0.1")
+            if (origin == "*" or parts.path not in ("", "/") or not parts.hostname
+                    or not (parts.scheme == "https" or (parts.scheme == "http" and local))):
+                raise ValueError(
+                    f"Invalid SOC_CORS_ORIGINS entry {origin!r}: use exact origins "
+                    f"like https://my-dashboard.vercel.app (http only for localhost)"
+                )
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Settings":
@@ -122,6 +168,9 @@ class Settings:
             api_host=get("SOC_API_HOST", str.strip, "127.0.0.1"),
             api_port=api_port,
             max_upload_mb=max_upload_mb,
+            api_key=get("SOC_API_KEY", str.strip, None),
+            cors_origins=[o.rstrip("/") for o in get("SOC_CORS_ORIGINS", _parse_list, [])],
+            cors_origin_regex=get("SOC_CORS_ORIGIN_REGEX", str.strip, None),
         )
 
     def describe(self) -> Dict[str, object]:
@@ -138,6 +187,8 @@ class Settings:
             "thresholds": dict(self.thresholds),
             "log_level": self.log_level,
             "max_upload_mb": self.max_upload_mb,
+            "api_key_configured": self.api_key is not None,
+            "cors_origins": list(self.cors_origins),
         }
 
 

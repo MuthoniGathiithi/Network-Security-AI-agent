@@ -10,6 +10,7 @@ Run:
     uvicorn src.api:app --host 127.0.0.1   # or directly with uvicorn
 """
 
+import hmac
 import logging
 import os
 import tempfile
@@ -17,7 +18,9 @@ import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
 from src import __version__
@@ -129,6 +132,7 @@ def create_app(
         FastAPI application
     """
     settings = settings or load_settings()
+    settings.validate_api_security()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -142,6 +146,57 @@ def create_app(
         lifespan=lifespan,
     )
 
+    if settings.cors_origins or settings.cors_origin_regex:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_origin_regex=settings.cors_origin_regex,
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=["Authorization", "Content-Type"],
+            allow_credentials=False,  # bearer token, no cookies
+            max_age=600,
+        )
+
+    bearer = HTTPBearer(auto_error=False)
+
+    def require_api_key(
+        request: Request,
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
+    ) -> None:
+        """
+        Check `Authorization: Bearer <SOC_API_KEY>`.
+
+        Without a configured key, only loopback clients are accepted. This
+        also covers `uvicorn src.api:app --host 0.0.0.0`, which bypasses the
+        SOC_API_HOST startup check.
+        """
+        if settings.api_key is None:
+            client = request.client.host if request.client else ""
+            # "testclient" is the placeholder host FastAPI's TestClient uses;
+            # it can't come from a real socket
+            if client not in ("127.0.0.1", "::1", "localhost", "testclient"):
+                raise HTTPException(
+                    status_code=403,
+                    detail="API key required for remote access (set SOC_API_KEY)",
+                )
+            return
+        supplied = credentials.credentials if credentials else ""
+        # Constant-time comparison: don't leak key prefixes through timing
+        if not hmac.compare_digest(supplied.encode(), settings.api_key.encode()):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or missing API key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    api = APIRouter(dependencies=[Depends(require_api_key)])
+
+    if settings.api_key is None:
+        logger.warning(
+            "SOC_API_KEY is not set: the API accepts unauthenticated requests "
+            "(allowed only because it is bound to loopback)"
+        )
+
     def service(request: Request) -> AgentService:
         return request.app.state.service
 
@@ -152,7 +207,7 @@ def create_app(
         """Liveness check."""
         return {"status": "ok"}
 
-    @app.get("/api/status")
+    @api.get("/status")
     def status(request: Request) -> Dict[str, Any]:
         """Agent statistics, model state and (non-secret) settings."""
         svc = service(request)
@@ -166,7 +221,7 @@ def create_app(
 
     # -------------------------------------------------------- analysis/train
 
-    @app.post("/api/analyze")
+    @api.post("/analyze")
     def analyze(
         request: Request,
         file: UploadFile = File(..., description="pcap or pcapng capture"),
@@ -186,7 +241,7 @@ def create_app(
         result["model_trained"] = svc.soc.detection_agent.ml_model.is_fitted
         return result
 
-    @app.post("/api/train")
+    @api.post("/train")
     def train(
         request: Request,
         file: UploadFile = File(..., description="Capture of known-benign traffic"),
@@ -215,7 +270,7 @@ def create_app(
 
     # ------------------------------------------------------------- history
 
-    @app.get("/api/detections")
+    @api.get("/detections")
     def detections(
         request: Request,
         limit: int = Query(100, ge=1, le=10_000),
@@ -231,7 +286,7 @@ def create_app(
         matching = [d for d in reversed(history) if d.threat_level >= threshold]
         return [d.to_dict(include_features=include_features) for d in matching[:limit]]
 
-    @app.delete("/api/detections")
+    @api.delete("/detections")
     def clear_detections(request: Request) -> Dict[str, str]:
         """Clear detection history (does not unblock anything)."""
         svc = service(request)
@@ -239,7 +294,7 @@ def create_app(
             svc.soc.detection_agent.clear_history()
         return {"status": "cleared"}
 
-    @app.get("/api/responses")
+    @api.get("/responses")
     def responses(
         request: Request,
         limit: int = Query(100, ge=1, le=10_000),
@@ -248,7 +303,7 @@ def create_app(
         history = service(request).soc.response_agent.get_action_history()
         return list(reversed(history))[:limit]
 
-    @app.get("/api/export")
+    @api.get("/export")
     def export(request: Request) -> Dict[str, Any]:
         """Full export: stats, detections with features, responses, blocklist."""
         soc = service(request).soc
@@ -261,7 +316,7 @@ def create_app(
 
     # ------------------------------------------------------------ blocklist
 
-    @app.get("/api/blocklist")
+    @api.get("/blocklist")
     def blocklist(request: Request) -> Dict[str, Any]:
         svc = service(request)
         return {
@@ -277,7 +332,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=result)
         return result
 
-    @app.post("/api/blocklist")
+    @api.post("/blocklist")
     def block(request: Request, body: IPRequest) -> Dict[str, Any]:
         """Manually block an IP (respects dry-run and the allowlist)."""
         svc = service(request)
@@ -285,7 +340,7 @@ def create_app(
         action.details["source"] = "manual (API)"
         return _record(svc, action)
 
-    @app.delete("/api/blocklist/{ip}")
+    @api.delete("/blocklist/{ip}")
     def unblock(request: Request, ip: str) -> Dict[str, Any]:
         """Remove an IP from the firewall and blocklist."""
         svc = service(request)
@@ -293,6 +348,7 @@ def create_app(
         action.details["source"] = "manual (API)"
         return _record(svc, action)
 
+    app.include_router(api, prefix="/api")
     return app
 
 
