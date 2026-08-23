@@ -56,6 +56,11 @@ class Settings:
     # Logging
     log_level: str = "INFO"
 
+    # API server
+    api_host: str = "127.0.0.1"  # local only by default
+    api_port: int = 8000
+    max_upload_mb: int = 500
+
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Settings":
         """
@@ -96,6 +101,13 @@ class Settings:
         if cooldown < 0:
             raise ValueError("SOC_ALERT_COOLDOWN_SECONDS must be >= 0")
 
+        api_port = get("SOC_API_PORT", int, 8000)
+        if not 0 < api_port < 65536:
+            raise ValueError("SOC_API_PORT must be between 1 and 65535")
+        max_upload_mb = get("SOC_MAX_UPLOAD_MB", int, 500)
+        if max_upload_mb <= 0:
+            raise ValueError("SOC_MAX_UPLOAD_MB must be > 0")
+
         return cls(
             dry_run=get("SOC_DRY_RUN", _parse_bool, True),
             auto_block_critical=get("SOC_AUTO_BLOCK_CRITICAL", _parse_bool, False),
@@ -107,6 +119,9 @@ class Settings:
             model_path=get("SOC_MODEL_PATH", str.strip, None),
             thresholds=thresholds,
             log_level=log_level,
+            api_host=get("SOC_API_HOST", str.strip, "127.0.0.1"),
+            api_port=api_port,
+            max_upload_mb=max_upload_mb,
         )
 
     def describe(self) -> Dict[str, object]:
@@ -122,6 +137,7 @@ class Settings:
             "model_path": self.model_path,
             "thresholds": dict(self.thresholds),
             "log_level": self.log_level,
+            "max_upload_mb": self.max_upload_mb,
         }
 
 

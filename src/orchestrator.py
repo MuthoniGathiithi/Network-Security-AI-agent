@@ -7,6 +7,7 @@ Provides API for real-time analysis and dashboard integration.
 
 import json
 import logging
+import os
 from typing import TYPE_CHECKING, Dict, Any, List, Optional
 from datetime import datetime, timezone
 from pathlib import Path
@@ -117,11 +118,22 @@ class SOCAgent:
 
         settings = settings or load_settings()
         logger.info(f"Starting SOC Agent with settings: {settings.describe()}")
+
+        # SOC_MODEL_PATH is also where training saves the model, so on first
+        # run it may not exist yet: start untrained instead of failing
+        model_path = settings.model_path
+        if model_path and not os.path.exists(model_path):
+            logger.warning(
+                f"No model at {model_path} yet; starting untrained (all flows "
+                f"rate LOW). Train one and it will be saved there."
+            )
+            model_path = None
+
         return cls(
             dry_run=settings.dry_run,
             slack_webhook=settings.slack_webhook,
             webhook_urls=settings.webhook_urls,
-            model_path=settings.model_path,
+            model_path=model_path,
             allowlist=settings.allowlist,
             blocklist_file=settings.blocklist_file,
             alert_cooldown_seconds=settings.alert_cooldown_seconds,
