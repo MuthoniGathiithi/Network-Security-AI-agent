@@ -842,13 +842,15 @@ class ResponseAgent:
 
     def respond_to_detection(
         self,
-        detection_result: Dict[str, Any]
+        detection_result: Dict[str, Any],
+        allow_block: bool = True
     ) -> List[ResponseAction]:
         """
         Execute response playbook for a detection.
 
         Args:
             detection_result: Result from detection agent
+            allow_block: If False, CRITICAL detections alert but don't block
 
         Returns:
             List of ResponseActions executed
@@ -873,7 +875,7 @@ class ResponseAgent:
         logger.info(f"Executing response for {src_ip} (Level: {threat_level})")
 
         # CRITICAL: Block IP immediately (only if we know who to block)
-        if threat_level == ThreatLevel.CRITICAL:
+        if threat_level == ThreatLevel.CRITICAL and allow_block:
             if has_valid_ip:
                 block_action = self.ip_blocker.block_ip(src_ip, "both")
             else:

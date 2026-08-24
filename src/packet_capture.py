@@ -8,6 +8,8 @@ Extracts NetFlow-style features for ML analysis.
 import logging
 import os
 import queue
+import socket
+import threading
 import time
 from typing import Iterable, Iterator, Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
@@ -553,6 +555,28 @@ class PacketCapture:
             logger.debug(f"Failed to extract packet info: {e}")
             return None
 
+    @staticmethod
+    def check_capture_permission() -> None:
+        """
+        Fail fast if live capture isn't permitted.
+
+        Scapy's background sniffer dies silently without privileges, which
+        would look like a quiet network. Opening a raw socket up front turns
+        that into a clear error.
+
+        Raises:
+            PermissionError: If raw sockets can't be opened
+        """
+        if not hasattr(socket, "AF_PACKET"):  # non-Linux: let scapy decide
+            return
+        try:
+            socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0003)).close()
+        except PermissionError:
+            raise PermissionError(
+                "Live capture needs root or the CAP_NET_RAW capability "
+                "(e.g. `sudo setcap cap_net_raw,cap_net_admin+eip $(readlink -f $(which python3))`)"
+            ) from None
+
     def read_pcap(
         self,
         pcap_file: str,
@@ -688,7 +712,8 @@ class PacketCapture:
         self,
         interface: Optional[str] = None,
         packet_count: int = 0,
-        callback=None
+        callback=None,
+        stop_event: Optional[threading.Event] = None
     ) -> Iterator[Tuple[FlowFeatures, str, str]]:
         """
         Capture packets from a live network interface.
@@ -697,10 +722,17 @@ class PacketCapture:
             interface: Network interface (e.g., 'eth0'). If None, uses default.
             packet_count: Number of packets to capture (0 = unlimited)
             callback: Optional callback function for each packet
+            stop_event: Set it to stop capturing; remaining flows are then
+                flushed and analyzed (stops within about a second)
 
         Yields:
             Tuple of (FlowFeatures, src_ip, dst_ip) for completed flows
+
+        Raises:
+            PermissionError: If the process may not open raw sockets
         """
+        self.check_capture_permission()
+
         # Sniff in a background thread and hand packets over through a queue,
         # so this generator can yield flows while capture is still running.
         packet_queue: "queue.Queue[Any]" = queue.Queue()
@@ -716,6 +748,9 @@ class PacketCapture:
             sniffer.start()
 
             while sniffer.thread.is_alive() or not packet_queue.empty():
+                if stop_event is not None and stop_event.is_set():
+                    logger.info("Live capture stop requested")
+                    break
                 try:
                     packet = packet_queue.get(timeout=1.0)
                 except queue.Empty:
@@ -731,7 +766,7 @@ class PacketCapture:
                 if metadata:
                     yield from self._process_packet(metadata)
 
-            # Capture finished (packet_count reached): flush remaining flows
+            # Capture finished (count reached or stopped): flush remaining flows
             yield from self._emit_flows(self.flow_aggregator.get_all_flows())
 
         except Exception as e:

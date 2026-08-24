@@ -8,7 +8,8 @@ Provides API for real-time analysis and dashboard integration.
 import json
 import logging
 import os
-from typing import TYPE_CHECKING, Dict, Any, List, Optional
+import threading
+from typing import TYPE_CHECKING, Callable, Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,6 +82,9 @@ class SOCAgent:
             auto_block_critical: Default for analyze_pcap(auto_block_critical=...)
         """
         self.auto_block_critical = auto_block_critical
+        # Guards detection/response state shared by pcap analysis, live
+        # capture and API readers. Re-entrant so helpers can nest.
+        self.lock = threading.RLock()
         self.detection_agent = DetectionAgent(model_path=model_path, thresholds=thresholds)
         self.response_agent = ResponseAgent(
             dry_run=dry_run,
@@ -159,7 +163,8 @@ class SOCAgent:
 
         if training_data:
             training_array = np.array(training_data)
-            self.detection_agent.train(training_array)
+            with self.lock:
+                self.detection_agent.train(training_array)
             logger.info(f"Trained on {flow_count} benign flows")
         else:
             logger.warning("No training data extracted")
@@ -199,30 +204,14 @@ class SOCAgent:
         responses = []
         flow_count = 0
 
-        for features, src_ip, dst_ip in self.packet_capture.read_pcap(pcap_file):
+        for features, src_ip, dst_ip in PacketCapture().read_pcap(pcap_file):
             flow_count += 1
-            self.stats["flows_analyzed"] += 1
-
-            # Perform detection
-            detection = self.detection_agent.detect(features, src_ip, dst_ip)
-
+            detection, actions = self._handle_flow(
+                features, src_ip, dst_ip, auto_block_critical
+            )
             if detection.threat_level > ThreatLevel.LOW:
                 detections.append(detection)
-                self.stats["threats_detected"] += 1
-
-                if detection.threat_level == ThreatLevel.CRITICAL:
-                    self.stats["critical_alerts"] += 1
-
-                    if auto_block_critical:
-                        # Execute response (features kept for the local log;
-                        # AlertManager strips them before anything is sent)
-                        actions = self.response_agent.respond_to_detection(
-                            detection.to_dict(include_features=True)
-                        )
-                        responses.extend(actions)
-
-                        if any(a.action_type == "BLOCK_IP" and a.status == "SUCCESS" for a in actions):
-                            self.stats["ips_blocked"] += 1
+            responses.extend(actions)
 
         logger.info(f"Analysis complete: {flow_count} flows, {len(detections)} threats")
 
@@ -234,6 +223,85 @@ class SOCAgent:
             "responses": [a.to_dict() for a in responses],
             "stats": dict(self.stats)
         }
+
+    def _handle_flow(
+        self,
+        features: FlowFeatures,
+        src_ip: str,
+        dst_ip: str,
+        auto_block_critical: bool
+    ) -> Tuple[Any, List[Any]]:
+        """
+        Detect and respond to one flow, updating stats (thread-safe).
+
+        HIGH and CRITICAL detections always go to the response agent so
+        alerts are sent; blocking happens only when auto_block_critical.
+
+        Returns:
+            (DetectionResult, list of ResponseActions)
+        """
+        with self.lock:
+            self.stats["flows_analyzed"] += 1
+            detection = self.detection_agent.detect(features, src_ip, dst_ip)
+            actions: List[Any] = []
+
+            if detection.threat_level > ThreatLevel.LOW:
+                self.stats["threats_detected"] += 1
+            if detection.threat_level == ThreatLevel.CRITICAL:
+                self.stats["critical_alerts"] += 1
+
+            if detection.threat_level >= ThreatLevel.HIGH:
+                # Features kept for the local log; AlertManager strips them
+                # before anything is sent externally
+                actions = self.response_agent.respond_to_detection(
+                    detection.to_dict(include_features=True),
+                    allow_block=auto_block_critical,
+                )
+                if any(a.action_type == "BLOCK_IP" and a.status == "SUCCESS" for a in actions):
+                    self.stats["ips_blocked"] += 1
+
+            return detection, actions
+
+    def monitor_live(
+        self,
+        interface: Optional[str] = None,
+        stop_event: Optional[threading.Event] = None,
+        auto_block_critical: Optional[bool] = None,
+        on_flow: Optional[Callable[[Any], None]] = None
+    ) -> Dict[str, int]:
+        """
+        Analyze live traffic until stop_event is set.
+
+        Uses its own PacketCapture, so it can run alongside pcap analysis.
+
+        Args:
+            interface: Network interface (None = scapy default)
+            stop_event: Set to stop monitoring
+            auto_block_critical: Block CRITICAL sources (default: agent setting)
+            on_flow: Called with each DetectionResult (e.g. for progress)
+
+        Returns:
+            Counts of flows and threats seen during this session
+
+        Raises:
+            PermissionError: Without root / CAP_NET_RAW
+        """
+        if auto_block_critical is None:
+            auto_block_critical = self.auto_block_critical
+
+        flows = threats = 0
+        capture = PacketCapture()
+        for features, src_ip, dst_ip in capture.capture_live(
+            interface=interface, stop_event=stop_event
+        ):
+            detection, _ = self._handle_flow(features, src_ip, dst_ip, auto_block_critical)
+            flows += 1
+            if detection.threat_level > ThreatLevel.LOW:
+                threats += 1
+            if on_flow:
+                on_flow(detection)
+        logger.info(f"Live monitoring stopped: {flows} flows, {threats} threats")
+        return {"flows": flows, "threats": threats}
 
     def get_dashboard_data(self) -> Dict[str, Any]:
         """
