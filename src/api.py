@@ -16,17 +16,18 @@ import os
 import tempfile
 import threading
 from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src import __version__
 from src.config import Settings, load_settings
 from src.orchestrator import SOCAgent
-from src.packet_capture import PcapReadError
+from src.packet_capture import PacketCapture, PcapReadError
 from src.threat import ThreatLevel
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,98 @@ UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 class IPRequest(BaseModel):
     ip: str
+
+
+class LiveStartRequest(BaseModel):
+    interface: Optional[str] = Field(None, description="Interface name; default route if omitted")
+    auto_block: Optional[bool] = Field(None, description="Default: SOC_AUTO_BLOCK_CRITICAL")
+
+
+def _list_interfaces() -> List[str]:
+    """Network interfaces available for capture."""
+    try:
+        from scapy.all import get_if_list
+        return sorted(get_if_list())
+    except Exception:
+        return []
+
+
+class LiveMonitor:
+    """Runs SOCAgent.monitor_live in a background thread."""
+
+    def __init__(self, soc: SOCAgent):
+        self.soc = soc
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self.interface: Optional[str] = None
+        self.started_at: Optional[str] = None
+        self.stopped_at: Optional[str] = None
+        self.flows = 0
+        self.threats = 0
+        self.error: Optional[str] = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def status(self) -> Dict[str, Any]:
+        return {
+            "running": self.running,
+            "interface": self.interface,
+            "started_at": self.started_at,
+            "stopped_at": self.stopped_at,
+            "flows": self.flows,
+            "threats": self.threats,
+            "error": self.error,
+        }
+
+    def start(self, interface: Optional[str], auto_block: Optional[bool]) -> None:
+        with self._lock:
+            if self.running:
+                raise HTTPException(status_code=409, detail="Live capture is already running")
+            if interface is not None and interface not in _list_interfaces():
+                raise HTTPException(status_code=400, detail=f"Unknown interface {interface!r}")
+            try:
+                PacketCapture.check_capture_permission()
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=str(e))
+
+            self._stop.clear()
+            self.interface = interface
+            self.started_at = datetime.now(timezone.utc).isoformat()
+            self.stopped_at = None
+            self.flows = self.threats = 0
+            self.error = None
+            self._thread = threading.Thread(
+                target=self._run, args=(interface, auto_block),
+                name="live-capture", daemon=True,
+            )
+            self._thread.start()
+
+    def _on_flow(self, detection) -> None:
+        self.flows += 1
+        if detection.threat_level > ThreatLevel.LOW:
+            self.threats += 1
+
+    def _run(self, interface: Optional[str], auto_block: Optional[bool]) -> None:
+        try:
+            self.soc.monitor_live(
+                interface=interface,
+                stop_event=self._stop,
+                auto_block_critical=auto_block,
+                on_flow=self._on_flow,
+            )
+        except Exception as e:
+            logger.exception("Live capture crashed")
+            self.error = str(e)
+        finally:
+            self.stopped_at = datetime.now(timezone.utc).isoformat()
+
+    def stop(self, timeout: float = 10.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
 
 
 class AgentService:
@@ -138,7 +231,9 @@ def create_app(
     async def lifespan(app: FastAPI):
         agent = soc or SOCAgent.from_settings(settings)
         app.state.service = AgentService(agent, settings)
+        app.state.live = LiveMonitor(agent)
         yield
+        app.state.live.stop()
 
     app = FastAPI(
         title="Network Security AI Agent",
@@ -211,11 +306,15 @@ def create_app(
     def status(request: Request) -> Dict[str, Any]:
         """Agent statistics, model state and (non-secret) settings."""
         svc = service(request)
+        with svc.soc.lock:
+            stats = dict(svc.soc.stats)
+            model = _model_info(svc.soc)
         return {
             "version": __version__,
             "busy": svc.current_job,
-            "stats": dict(svc.soc.stats),
-            "model": _model_info(svc.soc),
+            "live": request.app.state.live.status(),
+            "stats": stats,
+            "model": model,
             "settings": svc.settings.describe(),
         }
 
@@ -282,7 +381,9 @@ def create_app(
             threshold = ThreatLevel.parse(min_level)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
-        history = service(request).soc.detection_agent.detection_history
+        soc = service(request).soc
+        with soc.lock:
+            history = list(soc.detection_agent.detection_history)
         matching = [d for d in reversed(history) if d.threat_level >= threshold]
         return [d.to_dict(include_features=include_features) for d in matching[:limit]]
 
@@ -290,7 +391,7 @@ def create_app(
     def clear_detections(request: Request) -> Dict[str, str]:
         """Clear detection history (does not unblock anything)."""
         svc = service(request)
-        with svc.exclusive("clearing history"):
+        with svc.exclusive("clearing history"), svc.soc.lock:
             svc.soc.detection_agent.clear_history()
         return {"status": "cleared"}
 
@@ -300,19 +401,15 @@ def create_app(
         limit: int = Query(100, ge=1, le=10_000),
     ) -> List[Dict[str, Any]]:
         """Most recent response actions first (blocks, alerts, logs)."""
-        history = service(request).soc.response_agent.get_action_history()
+        soc = service(request).soc
+        with soc.lock:
+            history = soc.response_agent.get_action_history()
         return list(reversed(history))[:limit]
 
     @api.get("/export")
     def export(request: Request) -> Dict[str, Any]:
         """Full export: stats, detections with features, responses, blocklist."""
-        soc = service(request).soc
-        return {
-            "stats": dict(soc.stats),
-            "detections": soc.detection_agent.get_alerts(),
-            "responses": soc.response_agent.get_action_history(),
-            "blocklist": soc.response_agent.get_blocklist(),
-        }
+        return service(request).soc.export_data()
 
     # ------------------------------------------------------------ blocklist
 
@@ -326,7 +423,8 @@ def create_app(
 
     def _record(svc: AgentService, action) -> Dict[str, Any]:
         """Keep manual actions in the response history for auditing."""
-        svc.soc.response_agent.action_history.append(action)
+        with svc.soc.lock:
+            svc.soc.response_agent.action_history.append(action)
         result = action.to_dict()
         if action.status == "FAILED":
             raise HTTPException(status_code=400, detail=result)
@@ -347,6 +445,27 @@ def create_app(
         action = svc.soc.response_agent.ip_blocker.unblock_ip(ip)
         action.details["source"] = "manual (API)"
         return _record(svc, action)
+
+    # --------------------------------------------------------- live capture
+
+    @api.get("/live")
+    def live_status(request: Request) -> Dict[str, Any]:
+        """Live capture state plus interfaces available to capture on."""
+        return {**request.app.state.live.status(), "interfaces": _list_interfaces()}
+
+    @api.post("/live/start")
+    def live_start(request: Request, body: LiveStartRequest) -> Dict[str, Any]:
+        """Start analyzing traffic on a network interface."""
+        live = request.app.state.live
+        live.start(body.interface, body.auto_block)
+        return live.status()
+
+    @api.post("/live/stop")
+    def live_stop(request: Request) -> Dict[str, Any]:
+        """Stop live capture; flows still open are analyzed first."""
+        live = request.app.state.live
+        live.stop()
+        return live.status()
 
     app.include_router(api, prefix="/api")
     return app

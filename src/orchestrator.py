@@ -310,14 +310,29 @@ class SOCAgent:
         Returns:
             Dictionary with all dashboard data
         """
-        return {
-            "stats": dict(self.stats),
-            "recent_detections": [
-                d.to_dict() for d in list(self.detection_agent.detection_history)[-50:]
-            ],
-            "recent_responses": self.response_agent.get_action_history()[-50:],
-            "blocklist": self.response_agent.get_blocklist()
-        }
+        with self.lock:
+            return {
+                "stats": dict(self.stats),
+                "recent_detections": [
+                    d.to_dict() for d in list(self.detection_agent.detection_history)[-50:]
+                ],
+                "recent_responses": self.response_agent.get_action_history()[-50:],
+                "blocklist": self.response_agent.get_blocklist()
+            }
+
+    def export_data(self) -> Dict[str, Any]:
+        """
+        Snapshot of everything: stats, detections with features, responses,
+        blocklist (thread-safe).
+        """
+        with self.lock:
+            return {
+                "export_time": datetime.now(timezone.utc).isoformat(),
+                "stats": dict(self.stats),
+                "detections": self.detection_agent.get_alerts(),
+                "responses": self.response_agent.get_action_history(),
+                "blocklist": self.response_agent.get_blocklist()
+            }
 
     def export_results(self, output_file: str) -> None:
         """
@@ -326,13 +341,7 @@ class SOCAgent:
         Args:
             output_file: Path to output JSON file
         """
-        data = {
-            "export_time": datetime.now(timezone.utc).isoformat(),
-            "stats": self.stats,
-            "detections": self.detection_agent.get_alerts(),
-            "responses": self.response_agent.get_action_history(),
-            "blocklist": self.response_agent.get_blocklist()
-        }
+        data = self.export_data()
 
         with open(output_file, "w") as f:
             json.dump(data, f, indent=2, default=_json_default)
