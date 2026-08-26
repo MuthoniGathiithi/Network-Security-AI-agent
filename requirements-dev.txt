@@ -1,36 +1,20 @@
-# Development and Testing Dependencies
-# Install with: pip install -r requirements-dev.txt
+# Development and testing dependencies
+# Install: pip install -r requirements-dev.txt
+
+-r requirements.txt
 
 # Testing
-pytest==7.4.3
-pytest-cov==4.1.0
-pytest-asyncio==0.21.1
-pytest-mock==3.12.0
+pytest>=7.4
+pytest-cov>=4.1
+httpx>=0.27              # FastAPI TestClient
 
-# Code Quality
-black==23.12.0
-isort==5.13.2
-flake8==6.1.0
-pylint==3.0.3
-mypy==1.7.1
-bandit==1.7.5
+# Code quality
+black>=24.1
+isort>=5.13
+flake8>=7.0
+mypy>=1.8
+bandit>=1.7
+pre-commit>=3.5
 
-# Pre-commit hooks
-pre-commit==3.5.0
-
-# Documentation
-sphinx==7.2.6
-sphinx-rtd-theme==2.0.0
-sphinx-autodoc-typehints==1.25.2
-
-# Debugging
-ipython==8.18.1
-pdbpp==0.10.3
-
-# Performance profiling
-line-profiler==4.1.1
-memory-profiler==0.61.0
-
-# Type checking stubs
-types-requests==2.31.0.10
-types-setuptools==69.0.0.0
+# Type stubs
+types-requests>=2.31

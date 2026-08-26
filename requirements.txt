@@ -1,42 +1,29 @@
-# Core AI & ML
-crewai==0.28.0
-langchain==0.1.20
-langchain-openai==0.1.7
-scikit-learn==1.4.1
-numpy==1.24.3
-pandas==2.1.1
+# Runtime dependencies for the agent and its HTTP API.
+# Install: pip install -r requirements.txt
+# Development and tests: pip install -r requirements-dev.txt
+#
+# Optional:
+#   pip install crewai   # only for DetectionAgent(enable_crew=True)
 
-# Packet Processing
-scapy==2.5.0
-dpkt==1.9.7
+# Machine learning
+numpy>=1.26,<3
+scikit-learn>=1.4,<2
+joblib>=1.3              # model save/load (also pulled in by scikit-learn)
 
-# Dashboard & Visualization
-streamlit==1.31.0
-plotly==5.18.0
-pandas==2.1.1
+# Packet capture and parsing
+scapy>=2.5,<3
 
-# Web & Webhooks
-requests==2.31.0
-slack-sdk==3.26.1
+# Alert delivery (Slack and webhooks)
+requests>=2.31,<3
 
-# Utilities
-python-dotenv==1.0.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
+# HTTP API
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9  # pcap uploads
+pydantic>=2.5,<3
 
-# Development & Testing
-pytest==7.4.3
-pytest-cov==4.1.0
-black==23.12.0
-flake8==6.1.0
-pylint==3.0.3
+# Configuration (.env files)
+python-dotenv>=1.0
 
-# Optional: For advanced ML (TabNet)
-pytorch-tabnet==4.1.0
-
-# Documentation
-sphinx==7.2.6
-sphinx-rtd-theme==2.0.0
-
-# Security
-cryptography==41.0.7
+# Training from CSV (scripts/train_model.py --csv)
+pandas>=2.1
