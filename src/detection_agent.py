@@ -12,7 +12,7 @@ import logging
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 from datetime import datetime, timezone
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 
 import numpy as np
 from sklearn.ensemble import IsolationForest
@@ -156,6 +156,7 @@ class MLDetectionModel:
         )
         self.scaler = StandardScaler()
         self.is_fitted = False
+        self._warned_unfitted = False
         logger.info("MLDetectionModel initialized with Isolation Forest")
 
     def fit(self, features: np.ndarray) -> None:
@@ -185,19 +186,25 @@ class MLDetectionModel:
             Tuple of (prediction, anomaly_score)
             prediction: -1 for anomaly, 1 for normal
             anomaly_score: Raw anomaly score (higher = more anomalous)
+
+        Raises:
+            ValueError: If the features don't match what the model was
+                trained on. Errors are raised rather than reported as
+                "normal", so a broken model can't silently hide attacks.
         """
         if not self.is_fitted:
-            logger.warning("Model not fitted. Returning neutral prediction.")
+            if not self._warned_unfitted:
+                logger.warning(
+                    "Model not fitted; all flows will be rated normal until "
+                    "train() is called. (This warning is shown once.)"
+                )
+                self._warned_unfitted = True
             return 1, 0.0
 
-        try:
-            scaled = self.scaler.transform(features)
-            prediction = self.model.predict(scaled)[0]
-            score = -self.model.score_samples(scaled)[0]  # Negate for intuitive scale
-            return int(prediction), float(score)
-        except Exception as e:
-            logger.error(f"Prediction failed: {e}")
-            return 1, 0.0
+        scaled = self.scaler.transform(features)
+        prediction = self.model.predict(scaled)[0]
+        score = -self.model.score_samples(scaled)[0]  # Negate for intuitive scale
+        return int(prediction), float(score)
 
 
 class MitreAttackRAG:
@@ -322,7 +329,16 @@ class DetectionAgent:
 
         Args:
             training_data: Array of shape (n_samples, n_features) containing benign flows
+
+        Raises:
+            ValueError: If the column count doesn't match FlowFeatures
         """
+        expected = len(fields(FlowFeatures))
+        if training_data.ndim != 2 or training_data.shape[1] != expected:
+            raise ValueError(
+                f"Training data must have shape (n_samples, {expected}) to match "
+                f"FlowFeatures; got {training_data.shape}"
+            )
         self.ml_model.fit(training_data)
         logger.info("Detection Agent ML model trained")
 
@@ -534,7 +550,7 @@ if __name__ == "__main__":
 
     # Generate synthetic benign training data
     n_samples = 100
-    n_features = 60
+    n_features = len(fields(FlowFeatures))
 
     np.random.seed(42)
     benign_data = np.random.randn(n_samples, n_features) * 0.5 + 0.1
