@@ -18,7 +18,8 @@ import subprocess
 import os
 import tempfile
 import threading
-from typing import Any, Dict, Iterable, List, Optional, Union
+from collections import deque
+from typing import Any, Deque, Dict, Iterable, List, Optional, Union
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -718,13 +719,16 @@ class ResponseAgent:
     Main Response Agent coordinating automated security responses.
     """
 
+    DEFAULT_MAX_HISTORY = 10_000
+
     def __init__(
         self,
         dry_run: bool = False,
         slack_webhook: Optional[str] = None,
         webhook_urls: Optional[List[str]] = None,
         allowlist: Optional[Iterable[str]] = None,
-        blocklist_file: Optional[str] = None
+        blocklist_file: Optional[str] = None,
+        max_history: int = DEFAULT_MAX_HISTORY
     ):
         """
         Initialize Response Agent.
@@ -735,7 +739,12 @@ class ResponseAgent:
             webhook_urls: List of custom webhook URLs
             allowlist: IPs or CIDR ranges that must never be blocked
             blocklist_file: Path to the blocklist file
+            max_history: Maximum response actions kept in memory; oldest
+                are dropped first
         """
+        if max_history < 1:
+            raise ValueError("max_history must be at least 1")
+
         self.ip_blocker = IPBlockManager(
             dry_run=dry_run,
             allowlist=allowlist,
@@ -746,7 +755,7 @@ class ResponseAgent:
             webhook_urls=webhook_urls,
             dry_run=dry_run
         )
-        self.action_history: List[ResponseAction] = []
+        self.action_history: Deque[ResponseAction] = deque(maxlen=max_history)
         self.dry_run = dry_run
 
         logger.info(f"Response Agent initialized (dry_run={self.dry_run})")
