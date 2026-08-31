@@ -195,7 +195,7 @@ class SOCAgent:
                     "confidence": d.confidence,
                     "reasoning": d.reasoning,
                 }
-                for d in self.detection_agent.detection_history[-50:]
+                for d in list(self.detection_agent.detection_history)[-50:]
             ],
             "recent_responses": self.response_agent.get_action_history()[-50:],
             "blocklist": self.response_agent.get_blocklist()

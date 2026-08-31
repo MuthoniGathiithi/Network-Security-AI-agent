@@ -9,7 +9,8 @@ Uses CrewAI framework for multi-agent orchestration.
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 
@@ -262,16 +263,28 @@ class DetectionAgent:
     Orchestrates ML analysis, threat correlation, and reasoning.
     """
 
-    def __init__(self, model_path: Optional[str] = None):
+    DEFAULT_MAX_HISTORY = 10_000
+
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        max_history: int = DEFAULT_MAX_HISTORY
+    ):
         """
         Initialize the Detection Agent.
 
         Args:
             model_path: Path to pre-trained ML model (optional)
+            max_history: Maximum detections kept in memory. Oldest are
+                dropped first, so long-running live capture can't exhaust
+                memory. Use export_results() to persist them.
         """
+        if max_history < 1:
+            raise ValueError("max_history must be at least 1")
+
         self.ml_model = MLDetectionModel()
         self.mitre_rag = MitreAttackRAG()
-        self.detection_history: List[DetectionResult] = []
+        self.detection_history: Deque[DetectionResult] = deque(maxlen=max_history)
 
         logger.info("Detection Agent initialized")
 
