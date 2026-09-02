@@ -10,7 +10,7 @@ Uses CrewAI framework for multi-agent orchestration.
 import json
 import logging
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 
 import numpy as np
@@ -366,7 +366,7 @@ class DetectionAgent:
 
         # 6. Create detection result
         result = DetectionResult(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             src_ip=src_ip,
             dst_ip=dst_ip,
             threat_level=threat_level,

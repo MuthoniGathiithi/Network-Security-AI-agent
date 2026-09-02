@@ -8,7 +8,7 @@ Provides API for real-time analysis and dashboard integration.
 import json
 import logging
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -62,7 +62,7 @@ class SOCAgent:
             "threats_detected": 0,
             "critical_alerts": 0,
             "ips_blocked": 0,
-            "start_time": datetime.utcnow().isoformat()
+            "start_time": datetime.now(timezone.utc).isoformat()
         }
 
         logger.info("SOC Agent initialized")
@@ -209,7 +209,7 @@ class SOCAgent:
             output_file: Path to output JSON file
         """
         data = {
-            "export_time": datetime.utcnow().isoformat(),
+            "export_time": datetime.now(timezone.utc).isoformat(),
             "stats": self.stats,
             "detections": self.detection_agent.get_alerts(),
             "responses": self.response_agent.get_action_history(),

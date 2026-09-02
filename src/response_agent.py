@@ -19,7 +19,7 @@ import os
 import tempfile
 import threading
 from typing import Any, Dict, Iterable, List, Optional, Union
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 import requests
@@ -192,7 +192,7 @@ class IPBlockManager:
             ResponseAction with status
         """
         action = ResponseAction(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             action_type="BLOCK_IP",
             target=ip_address,
             status="PENDING",
@@ -261,7 +261,7 @@ class IPBlockManager:
             ResponseAction with status
         """
         action = ResponseAction(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             action_type="UNBLOCK_IP",
             target=ip_address,
             status="PENDING",
@@ -537,7 +537,7 @@ class AlertManager:
             ResponseAction with status
         """
         action = ResponseAction(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             action_type="ALERT",
             target=details.get("src_ip") or "unknown",
             status="PENDING",
@@ -644,7 +644,7 @@ class AlertManager:
                                 "value": details.get("reasoning", "No reasoning provided")
                             }
                         ],
-                        "ts": int(datetime.utcnow().timestamp())
+                        "ts": int(datetime.now(timezone.utc).timestamp())
                     }
                 ]
             }
@@ -688,7 +688,7 @@ class AlertManager:
         """
         try:
             payload = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "title": title,
                 "threat_level": threat_level,
                 "details": details
@@ -787,7 +787,7 @@ class ResponseAgent:
                 block_action = self.ip_blocker.block_ip(src_ip, "both")
             else:
                 block_action = ResponseAction(
-                    timestamp=datetime.utcnow().isoformat(),
+                    timestamp=datetime.now(timezone.utc).isoformat(),
                     action_type="BLOCK_IP",
                     target=src_ip,
                     status="SKIPPED",
@@ -806,7 +806,7 @@ class ResponseAgent:
 
         # All levels: Log
         log_action = ResponseAction(
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             action_type="LOG",
             target=src_ip,
             status="SUCCESS",
@@ -846,7 +846,7 @@ if __name__ == "__main__":
 
     # Simulate detection result
     detection_result = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "src_ip": "192.168.1.100",
         "dst_ip": "8.8.8.8",
         "threat_level": "CRITICAL",
