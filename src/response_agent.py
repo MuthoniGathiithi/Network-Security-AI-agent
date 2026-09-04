@@ -24,16 +24,6 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 import requests
 
-try:
-    from crewai import Agent
-except ImportError:
-    logging.warning("CrewAI not installed (optional for Response Agent)")
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -847,6 +837,10 @@ class ResponseAgent:
 
 # ==================== Example Usage ====================
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     # Initialize response agent (dry-run mode)
     response_agent = ResponseAgent(dry_run=True)
 

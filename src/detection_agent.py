@@ -22,11 +22,6 @@ try:
 except ImportError:
     raise ImportError("CrewAI not installed. Install with: pip install crewai")
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -517,6 +512,10 @@ class DetectionAgent:
 
 # ==================== Example Usage ====================
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     # Initialize agent
     agent = DetectionAgent()
 

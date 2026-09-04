@@ -21,11 +21,6 @@ except ImportError:
 
 from src.detection_agent import FlowFeatures
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -638,6 +633,10 @@ class PacketCapture:
 
 # ==================== Example Usage ====================
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     import os
 
     # Create a sample pcap file path (would come from CIC-IDS2017 or similar)
