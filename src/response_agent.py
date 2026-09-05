@@ -431,6 +431,14 @@ class AlertManager:
     Manages alert delivery via Slack, webhooks, or email.
     """
 
+    # Only these detection fields leave the host. Everything else (raw flow
+    # features, internal state, fields added by future callers) stays local.
+    SHAREABLE_FIELDS = (
+        "timestamp", "src_ip", "dst_ip", "threat_level", "attack_type",
+        "confidence", "mitre_techniques", "reasoning", "ml_score",
+    )
+    MAX_REASONING_CHARS = 1000
+
     def __init__(
         self,
         slack_webhook: Optional[str] = None,
@@ -503,6 +511,24 @@ class AlertManager:
                 message = message.replace(secret, "/<redacted>")
         return message
 
+    @classmethod
+    def _shareable_details(cls, details: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Reduce detection details to the fields that are safe to send to
+        external services, truncating long free text.
+
+        Args:
+            details: Full detection details
+
+        Returns:
+            Filtered copy of the details
+        """
+        shared = {k: details[k] for k in cls.SHAREABLE_FIELDS if k in details}
+        reasoning = shared.get("reasoning")
+        if isinstance(reasoning, str) and len(reasoning) > cls.MAX_REASONING_CHARS:
+            shared["reasoning"] = reasoning[:cls.MAX_REASONING_CHARS] + "..."
+        return shared
+
     def send_alert(
         self,
         title: str,
@@ -536,6 +562,7 @@ class AlertManager:
             return action
 
         deliveries = []
+        details = self._shareable_details(details)
 
         # Send to Slack
         if self.slack_webhook:
