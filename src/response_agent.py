@@ -16,6 +16,8 @@ import json
 import logging
 import subprocess
 import os
+import tempfile
+import threading
 from typing import Any, Dict, Iterable, List, Optional, Union
 from datetime import datetime
 from dataclasses import dataclass
@@ -74,6 +76,8 @@ class IPBlockManager:
         self.dry_run = dry_run
         self.allowlist = self._parse_allowlist(allowlist)
         self.blocked_ips = set()
+        # Serializes read-modify-write of the blocklist file across threads
+        self._blocklist_lock = threading.Lock()
         self.blocklist_file = (
             blocklist_file
             or os.getenv("BLOCKLIST_FILE")
@@ -354,18 +358,13 @@ class IPBlockManager:
         Args:
             ip_address: IP to add
         """
-        if ip_address in self.get_blocklist():
-            logger.debug(f"{ip_address} already in blocklist file")
-            return
+        with self._blocklist_lock:
+            current = self.get_blocklist()
+            if ip_address in current:
+                logger.debug(f"{ip_address} already in blocklist file")
+                return
 
-        # O_NOFOLLOW: refuse to write through a symlink planted at the path
-        fd = os.open(
-            self.blocklist_file,
-            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
-            0o600
-        )
-        with os.fdopen(fd, "a") as f:
-            f.write(f"{ip_address}\n")
+            self._write_blocklist(current + [ip_address])
         logger.debug(f"Added {ip_address} to blocklist file")
 
     def _remove_from_blocklist(self, ip_address: str) -> None:
@@ -375,18 +374,41 @@ class IPBlockManager:
         Args:
             ip_address: IP to remove
         """
+        with self._blocklist_lock:
+            current = self.get_blocklist()
+            if ip_address not in current:
+                return
+
+            self._write_blocklist([ip for ip in current if ip != ip_address])
+        logger.debug(f"Removed {ip_address} from blocklist file")
+
+    def _write_blocklist(self, ips: List[str]) -> None:
+        """
+        Atomically replace the blocklist file.
+
+        Writes to a temp file in the same directory, fsyncs it, then
+        os.replace()s it over the old file. Readers see either the old or
+        the new list, never a truncated one, even if the process crashes
+        mid-write. os.replace() also swaps out a planted symlink instead of
+        writing through it.
+
+        Args:
+            ips: Full list of IPs to store
+        """
+        directory = os.path.dirname(self.blocklist_file) or "."
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".blocklist-", suffix=".tmp")
         try:
-            with open(self.blocklist_file, "r") as f:
-                lines = f.readlines()
-
-            with open(self.blocklist_file, "w") as f:
-                for line in lines:
-                    if line.strip() != ip_address:
-                        f.write(line)
-
-            logger.debug(f"Removed {ip_address} from blocklist file")
-        except FileNotFoundError:
-            pass
+            with os.fdopen(fd, "w") as f:  # mkstemp creates the file as 0600
+                f.writelines(f"{ip}\n" for ip in ips)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, self.blocklist_file)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            raise
 
     def get_blocklist(self) -> List[str]:
         """
