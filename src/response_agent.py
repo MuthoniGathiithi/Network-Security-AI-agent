@@ -19,6 +19,7 @@ import os
 from typing import Any, Dict, Iterable, List, Optional, Union
 from datetime import datetime
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 import requests
 
 try:
@@ -424,6 +425,10 @@ class AlertManager:
         """
         self.slack_webhook = slack_webhook or os.getenv("SLACK_WEBHOOK_URL")
         self.webhook_urls = webhook_urls or []
+
+        for url in filter(None, [self.slack_webhook, *self.webhook_urls]):
+            self._validate_webhook_url(url)
+
         self.dry_run = dry_run
         self.alerts_sent = 0
 
@@ -433,6 +438,48 @@ class AlertManager:
             f"Webhooks: {len(self.webhook_urls)}, "
             f"dry_run: {self.dry_run})"
         )
+
+    @staticmethod
+    def _validate_webhook_url(url: str) -> None:
+        """
+        Require HTTPS so alert contents (internal IPs, attack details) and
+        the webhook secret are never sent in cleartext. Plain HTTP is only
+        allowed to loopback hosts, for local testing.
+
+        Args:
+            url: Webhook URL
+
+        Raises:
+            ValueError: If the URL is not HTTPS (or HTTP to localhost)
+        """
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+        if parts.scheme == "https" and host:
+            return
+        if parts.scheme == "http" and host in ("localhost", "127.0.0.1", "::1"):
+            return
+        raise ValueError(
+            f"Webhook URL must use https:// (got {AlertManager._redact_url(url)})"
+        )
+
+    @staticmethod
+    def _redact_url(url: str) -> str:
+        """
+        Strip the path and query from a URL for logging. Webhook URLs carry
+        their secret token in the path (e.g. hooks.slack.com/services/...).
+        """
+        parts = urlsplit(url)
+        return f"{parts.scheme}://{parts.netloc}/<redacted>"
+
+    @staticmethod
+    def _redact_error(error: Exception, url: str) -> str:
+        """Return the error message with the URL's secret path removed."""
+        message = str(error)
+        parts = urlsplit(url)
+        for secret in (parts.path, parts.query):
+            if secret and secret != "/":
+                message = message.replace(secret, "/<redacted>")
+        return message
 
     def send_alert(
         self,
@@ -577,8 +624,9 @@ class AlertManager:
                 return {"status": "failed", "code": response.status_code}
 
         except requests.RequestException as e:
-            logger.error(f"Failed to send Slack alert: {e}")
-            return {"status": "error", "error": str(e)}
+            error = self._redact_error(e, self.slack_webhook)
+            logger.error(f"Failed to send Slack alert: {error}")
+            return {"status": "error", "error": error}
 
     def _send_webhook_alert(
         self,
@@ -614,15 +662,16 @@ class AlertManager:
             )
 
             if response.status_code in (200, 201):
-                logger.info(f"Webhook alert sent to {webhook_url}")
+                logger.info(f"Webhook alert sent to {self._redact_url(webhook_url)}")
                 return {"status": "sent", "code": response.status_code}
             else:
                 logger.warning(f"Webhook failed with code {response.status_code}")
                 return {"status": "failed", "code": response.status_code}
 
         except requests.RequestException as e:
-            logger.error(f"Failed to send webhook alert: {e}")
-            return {"status": "error", "error": str(e)}
+            error = self._redact_error(e, webhook_url)
+            logger.error(f"Failed to send webhook alert: {error}")
+            return {"status": "error", "error": error}
 
 
 class ResponseAgent:
