@@ -454,7 +454,7 @@ class AlertManager:
         action = ResponseAction(
             timestamp=datetime.utcnow().isoformat(),
             action_type="ALERT",
-            target=details.get("src_ip", "unknown"),
+            target=details.get("src_ip") or "unknown",
             status="PENDING",
             details={"title": title, "level": threat_level}
         )
@@ -678,13 +678,33 @@ class ResponseAgent:
         """
         actions = []
         threat_level = detection_result.get("threat_level", "MEDIUM")
-        src_ip = detection_result.get("src_ip", "unknown")
+        raw_src_ip = detection_result.get("src_ip")
+
+        try:
+            src_ip = IPBlockManager._validate_ip(raw_src_ip)
+            has_valid_ip = True
+        except ValueError:
+            src_ip = "unknown"
+            has_valid_ip = False
+            logger.warning(
+                f"Detection has no valid source IP ({raw_src_ip!r}); "
+                "blocking will be skipped"
+            )
 
         logger.info(f"Executing response for {src_ip} (Level: {threat_level})")
 
-        # CRITICAL: Block IP immediately
+        # CRITICAL: Block IP immediately (only if we know who to block)
         if threat_level == "CRITICAL":
-            block_action = self.ip_blocker.block_ip(src_ip, "both")
+            if has_valid_ip:
+                block_action = self.ip_blocker.block_ip(src_ip, "both")
+            else:
+                block_action = ResponseAction(
+                    timestamp=datetime.utcnow().isoformat(),
+                    action_type="BLOCK_IP",
+                    target=src_ip,
+                    status="SKIPPED",
+                    details={"message": f"No valid source IP: {raw_src_ip!r}"}
+                )
             actions.append(block_action)
 
         # HIGH: Send alert
