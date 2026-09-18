@@ -37,7 +37,8 @@ class SOCAgent:
         slack_webhook: Optional[str] = None,
         webhook_urls: Optional[List[str]] = None,
         model_path: Optional[str] = None,
-        allowlist: Optional[List[str]] = None
+        allowlist: Optional[List[str]] = None,
+        blocklist_file: Optional[str] = None
     ):
         """
         Initialize the SOC Agent.
@@ -48,13 +49,15 @@ class SOCAgent:
             webhook_urls: List of custom webhook URLs
             model_path: Path to pre-trained ML model
             allowlist: IPs or CIDR ranges that must never be blocked
+            blocklist_file: Path to the blocklist file
         """
         self.detection_agent = DetectionAgent(model_path=model_path)
         self.response_agent = ResponseAgent(
             dry_run=dry_run,
             slack_webhook=slack_webhook,
             webhook_urls=webhook_urls,
-            allowlist=allowlist
+            allowlist=allowlist,
+            blocklist_file=blocklist_file
         )
         self.packet_capture = PacketCapture()
 

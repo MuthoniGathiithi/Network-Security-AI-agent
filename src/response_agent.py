@@ -56,7 +56,8 @@ class IPBlockManager:
     def __init__(
         self,
         dry_run: bool = False,
-        allowlist: Optional[Iterable[str]] = None
+        allowlist: Optional[Iterable[str]] = None,
+        blocklist_file: Optional[str] = None
     ):
         """
         Initialize IP block manager.
@@ -66,16 +67,43 @@ class IPBlockManager:
             allowlist: IPs or CIDR ranges that must never be blocked
                 (e.g. gateway, DNS servers, management hosts). Entries from
                 the BLOCK_ALLOWLIST env var (comma-separated) are added too.
+            blocklist_file: Path to the blocklist file. Falls back to the
+                BLOCKLIST_FILE env var, then default_blocklist_path().
         """
         self.dry_run = dry_run
         self.allowlist = self._parse_allowlist(allowlist)
         self.blocked_ips = set()
-        self.blocklist_file = "/tmp/threat_intelligence_blocklist.txt"
+        self.blocklist_file = (
+            blocklist_file
+            or os.getenv("BLOCKLIST_FILE")
+            or self.default_blocklist_path()
+        )
 
         if not self.dry_run:
-            os.makedirs(os.path.dirname(self.blocklist_file), exist_ok=True)
+            # Owner-only directory: other local users must not be able to
+            # read the blocklist or plant files/symlinks next to it
+            os.makedirs(os.path.dirname(self.blocklist_file), mode=0o700, exist_ok=True)
 
-        logger.info(f"IPBlockManager initialized (dry_run={self.dry_run})")
+        logger.info(
+            f"IPBlockManager initialized (dry_run={self.dry_run}, "
+            f"blocklist={self.blocklist_file})"
+        )
+
+    @staticmethod
+    def default_blocklist_path() -> str:
+        """
+        Return the default blocklist location.
+
+        Root uses /var/lib (system state); other users get a per-user state
+        directory. Both avoid world-writable /tmp.
+        """
+        if os.geteuid() == 0:
+            base = "/var/lib"
+        else:
+            base = os.getenv(
+                "XDG_STATE_HOME", os.path.join(os.path.expanduser("~"), ".local", "state")
+            )
+        return os.path.join(base, "network-security-ai-agent", "blocklist.txt")
 
     @staticmethod
     def _validate_ip(ip_address: str) -> str:
@@ -325,7 +353,17 @@ class IPBlockManager:
         Args:
             ip_address: IP to add
         """
-        with open(self.blocklist_file, "a") as f:
+        if ip_address in self.get_blocklist():
+            logger.debug(f"{ip_address} already in blocklist file")
+            return
+
+        # O_NOFOLLOW: refuse to write through a symlink planted at the path
+        fd = os.open(
+            self.blocklist_file,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+            0o600
+        )
+        with os.fdopen(fd, "a") as f:
             f.write(f"{ip_address}\n")
         logger.debug(f"Added {ip_address} to blocklist file")
 
@@ -354,11 +392,13 @@ class IPBlockManager:
         Get current blocklist.
 
         Returns:
-            List of blocked IPs
+            List of blocked IPs (unique, in the order they were added)
         """
         try:
             with open(self.blocklist_file, "r") as f:
-                return [line.strip() for line in f if line.strip()]
+                # dict.fromkeys de-duplicates while keeping order, which also
+                # hides duplicates written by older versions
+                return list(dict.fromkeys(line.strip() for line in f if line.strip()))
         except FileNotFoundError:
             return []
 
@@ -595,7 +635,8 @@ class ResponseAgent:
         dry_run: bool = False,
         slack_webhook: Optional[str] = None,
         webhook_urls: Optional[List[str]] = None,
-        allowlist: Optional[Iterable[str]] = None
+        allowlist: Optional[Iterable[str]] = None,
+        blocklist_file: Optional[str] = None
     ):
         """
         Initialize Response Agent.
@@ -605,8 +646,13 @@ class ResponseAgent:
             slack_webhook: Slack webhook URL
             webhook_urls: List of custom webhook URLs
             allowlist: IPs or CIDR ranges that must never be blocked
+            blocklist_file: Path to the blocklist file
         """
-        self.ip_blocker = IPBlockManager(dry_run=dry_run, allowlist=allowlist)
+        self.ip_blocker = IPBlockManager(
+            dry_run=dry_run,
+            allowlist=allowlist,
+            blocklist_file=blocklist_file
+        )
         self.alert_manager = AlertManager(
             slack_webhook=slack_webhook,
             webhook_urls=webhook_urls,
