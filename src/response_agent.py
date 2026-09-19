@@ -50,6 +50,8 @@ class IPBlockManager:
     """
 
     VALID_DIRECTIONS = ("inbound", "outbound", "both")
+    # Upper bound when deleting duplicate rules, so a failing -D can't loop forever
+    MAX_DUPLICATE_RULES = 100
 
     def __init__(
         self,
@@ -254,20 +256,17 @@ class IPBlockManager:
                 return action
 
             if os.geteuid() == 0:
-                # Remove from iptables
+                # Remove from iptables, including duplicates left by older
+                # versions that appended a rule on every detection
                 binary = self._firewall_binary(ip_address)
-                subprocess.run(
-                    [
-                        binary, "-D", "INPUT", "-s", ip_address, "-j", "DROP"
-                    ],
-                    check=False
-                )
-                subprocess.run(
-                    [
-                        binary, "-D", "OUTPUT", "-d", ip_address, "-j", "DROP"
-                    ],
-                    check=False
-                )
+                for chain in ("INPUT", "OUTPUT"):
+                    rule = self._drop_rule(ip_address, chain)
+                    for _ in range(self.MAX_DUPLICATE_RULES):
+                        if not self._rule_exists(binary, rule):
+                            break
+                        subprocess.run(
+                            [binary, "-D", *rule], check=True, capture_output=True
+                        )
                 logger.info(f"Successfully unblocked IP: {ip_address}")
 
             self.blocked_ips.discard(ip_address)
@@ -290,14 +289,34 @@ class IPBlockManager:
             chain: iptables chain (INPUT, OUTPUT, FORWARD)
         """
         binary = self._firewall_binary(ip_address)
-        if chain == "INPUT":
-            cmd = [binary, "-A", "INPUT", "-s", ip_address, "-j", "DROP"]
-        elif chain == "OUTPUT":
-            cmd = [binary, "-A", "OUTPUT", "-d", ip_address, "-j", "DROP"]
-        else:
-            cmd = [binary, "-A", "FORWARD", "-s", ip_address, "-j", "DROP"]
+        rule = self._drop_rule(ip_address, chain)
 
-        subprocess.run(cmd, check=True, capture_output=True)
+        if self._rule_exists(binary, rule):
+            logger.debug(f"{binary} {chain} DROP rule for {ip_address} already exists")
+            return
+
+        subprocess.run([binary, "-A", *rule], check=True, capture_output=True)
+
+    @staticmethod
+    def _drop_rule(ip_address: str, chain: str) -> List[str]:
+        """
+        Build the iptables rule spec (without the -A/-C/-D verb).
+
+        Args:
+            ip_address: IP to match
+            chain: iptables chain (INPUT, OUTPUT, FORWARD)
+
+        Returns:
+            Rule arguments, e.g. ["INPUT", "-s", ip, "-j", "DROP"]
+        """
+        match = "-d" if chain == "OUTPUT" else "-s"
+        return [chain, match, ip_address, "-j", "DROP"]
+
+    @staticmethod
+    def _rule_exists(binary: str, rule: List[str]) -> bool:
+        """Return True if the rule is already present (iptables -C)."""
+        result = subprocess.run([binary, "-C", *rule], capture_output=True)
+        return result.returncode == 0
 
     def _add_to_blocklist(self, ip_address: str) -> None:
         """
