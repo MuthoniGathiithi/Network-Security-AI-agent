@@ -16,7 +16,7 @@ import json
 import logging
 import subprocess
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 from datetime import datetime
 from dataclasses import dataclass
 import requests
@@ -51,14 +51,22 @@ class IPBlockManager:
 
     VALID_DIRECTIONS = ("inbound", "outbound", "both")
 
-    def __init__(self, dry_run: bool = False):
+    def __init__(
+        self,
+        dry_run: bool = False,
+        allowlist: Optional[Iterable[str]] = None
+    ):
         """
         Initialize IP block manager.
 
         Args:
             dry_run: If True, log actions without executing them
+            allowlist: IPs or CIDR ranges that must never be blocked
+                (e.g. gateway, DNS servers, management hosts). Entries from
+                the BLOCK_ALLOWLIST env var (comma-separated) are added too.
         """
         self.dry_run = dry_run
+        self.allowlist = self._parse_allowlist(allowlist)
         self.blocked_ips = set()
         self.blocklist_file = "/tmp/threat_intelligence_blocklist.txt"
 
@@ -88,6 +96,59 @@ class IPBlockManager:
             return str(ipaddress.ip_address(str(ip_address).strip()))
         except ValueError:
             raise ValueError(f"Invalid IP address: {ip_address!r}") from None
+
+    @staticmethod
+    def _parse_allowlist(
+        allowlist: Optional[Iterable[str]]
+    ) -> List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
+        """
+        Build the list of protected networks from arguments and environment.
+
+        Args:
+            allowlist: IPs or CIDR ranges passed by the caller
+
+        Returns:
+            List of ip_network objects
+
+        Raises:
+            ValueError: If an entry is not a valid IP or CIDR range
+        """
+        entries = list(allowlist or [])
+        entries += [e for e in os.getenv("BLOCK_ALLOWLIST", "").split(",") if e.strip()]
+
+        networks = []
+        for entry in entries:
+            try:
+                networks.append(ipaddress.ip_network(entry.strip(), strict=False))
+            except ValueError:
+                raise ValueError(f"Invalid allowlist entry: {entry!r}") from None
+        return networks
+
+    def is_protected(self, ip_address: str) -> Optional[str]:
+        """
+        Check whether an IP must never be blocked.
+
+        Args:
+            ip_address: Validated IP address
+
+        Returns:
+            Reason string if the IP is protected, otherwise None
+        """
+        ip = ipaddress.ip_address(ip_address)
+        if ip.is_loopback:
+            return "loopback address"
+        if ip.is_unspecified:
+            return "unspecified address"
+        if ip.is_multicast:
+            return "multicast address"
+        if ip.is_link_local:
+            return "link-local address"
+        if ip == ipaddress.ip_address("255.255.255.255"):
+            return "broadcast address"
+        for network in self.allowlist:
+            if ip in network:
+                return f"allowlisted ({network})"
+        return None
 
     @staticmethod
     def _firewall_binary(ip_address: str) -> str:
@@ -121,6 +182,13 @@ class IPBlockManager:
                 )
             ip_address = self._validate_ip(ip_address)
             action.target = ip_address
+
+            protected_reason = self.is_protected(ip_address)
+            if protected_reason:
+                logger.warning(f"Refusing to block {ip_address}: {protected_reason}")
+                action.status = "SKIPPED"
+                action.details["message"] = f"Protected IP: {protected_reason}"
+                return action
 
             if self.dry_run:
                 logger.info(f"[DRY RUN] Would block {ip_address} (direction: {direction})")
@@ -507,7 +575,8 @@ class ResponseAgent:
         self,
         dry_run: bool = False,
         slack_webhook: Optional[str] = None,
-        webhook_urls: Optional[List[str]] = None
+        webhook_urls: Optional[List[str]] = None,
+        allowlist: Optional[Iterable[str]] = None
     ):
         """
         Initialize Response Agent.
@@ -516,8 +585,9 @@ class ResponseAgent:
             dry_run: If True, log actions without executing
             slack_webhook: Slack webhook URL
             webhook_urls: List of custom webhook URLs
+            allowlist: IPs or CIDR ranges that must never be blocked
         """
-        self.ip_blocker = IPBlockManager(dry_run=dry_run)
+        self.ip_blocker = IPBlockManager(dry_run=dry_run, allowlist=allowlist)
         self.alert_manager = AlertManager(
             slack_webhook=slack_webhook,
             webhook_urls=webhook_urls,
