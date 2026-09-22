@@ -11,6 +11,7 @@ Capabilities include:
 Uses CrewAI for orchestration.
 """
 
+import ipaddress
 import json
 import logging
 import subprocess
@@ -48,6 +49,8 @@ class IPBlockManager:
     Manages IP blocking using iptables (Linux) or Windows Firewall.
     """
 
+    VALID_DIRECTIONS = ("inbound", "outbound", "both")
+
     def __init__(self, dry_run: bool = False):
         """
         Initialize IP block manager.
@@ -63,6 +66,33 @@ class IPBlockManager:
             os.makedirs(os.path.dirname(self.blocklist_file), exist_ok=True)
 
         logger.info(f"IPBlockManager initialized (dry_run={self.dry_run})")
+
+    @staticmethod
+    def _validate_ip(ip_address: str) -> str:
+        """
+        Validate that the target is a single host IP address.
+
+        Rejects CIDR ranges (e.g. "0.0.0.0/0"), hostnames and any other
+        string before it can reach iptables or the blocklist file.
+
+        Args:
+            ip_address: Candidate IP address
+
+        Returns:
+            Canonical string form of the IP
+
+        Raises:
+            ValueError: If the value is not a valid IPv4/IPv6 address
+        """
+        try:
+            return str(ipaddress.ip_address(str(ip_address).strip()))
+        except ValueError:
+            raise ValueError(f"Invalid IP address: {ip_address!r}") from None
+
+    @staticmethod
+    def _firewall_binary(ip_address: str) -> str:
+        """Return iptables for IPv4 or ip6tables for IPv6 addresses."""
+        return "ip6tables" if ipaddress.ip_address(ip_address).version == 6 else "iptables"
 
     def block_ip(self, ip_address: str, direction: str = "both") -> ResponseAction:
         """
@@ -84,6 +114,14 @@ class IPBlockManager:
         )
 
         try:
+            if direction not in self.VALID_DIRECTIONS:
+                raise ValueError(
+                    f"Invalid direction {direction!r}; "
+                    f"expected one of {self.VALID_DIRECTIONS}"
+                )
+            ip_address = self._validate_ip(ip_address)
+            action.target = ip_address
+
             if self.dry_run:
                 logger.info(f"[DRY RUN] Would block {ip_address} (direction: {direction})")
                 action.status = "SUCCESS"
@@ -138,6 +176,9 @@ class IPBlockManager:
         )
 
         try:
+            ip_address = self._validate_ip(ip_address)
+            action.target = ip_address
+
             if self.dry_run:
                 logger.info(f"[DRY RUN] Would unblock {ip_address}")
                 action.status = "SUCCESS"
@@ -146,15 +187,16 @@ class IPBlockManager:
 
             if os.geteuid() == 0:
                 # Remove from iptables
+                binary = self._firewall_binary(ip_address)
                 subprocess.run(
                     [
-                        "iptables", "-D", "INPUT", "-s", ip_address, "-j", "DROP"
+                        binary, "-D", "INPUT", "-s", ip_address, "-j", "DROP"
                     ],
                     check=False
                 )
                 subprocess.run(
                     [
-                        "iptables", "-D", "OUTPUT", "-d", ip_address, "-j", "DROP"
+                        binary, "-D", "OUTPUT", "-d", ip_address, "-j", "DROP"
                     ],
                     check=False
                 )
@@ -179,12 +221,13 @@ class IPBlockManager:
             ip_address: IP to block
             chain: iptables chain (INPUT, OUTPUT, FORWARD)
         """
+        binary = self._firewall_binary(ip_address)
         if chain == "INPUT":
-            cmd = ["iptables", "-A", "INPUT", "-s", ip_address, "-j", "DROP"]
+            cmd = [binary, "-A", "INPUT", "-s", ip_address, "-j", "DROP"]
         elif chain == "OUTPUT":
-            cmd = ["iptables", "-A", "OUTPUT", "-d", ip_address, "-j", "DROP"]
+            cmd = [binary, "-A", "OUTPUT", "-d", ip_address, "-j", "DROP"]
         else:
-            cmd = ["iptables", "-A", "FORWARD", "-s", ip_address, "-j", "DROP"]
+            cmd = [binary, "-A", "FORWARD", "-s", ip_address, "-j", "DROP"]
 
         subprocess.run(cmd, check=True, capture_output=True)
 
