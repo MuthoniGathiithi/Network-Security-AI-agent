@@ -307,11 +307,11 @@ class AlertManager:
             deliveries.append(slack_status)
 
         # Send to custom webhooks
-        for webhook_url in self.webhook_urls:
+        for i, webhook_url in enumerate(self.webhook_urls):
             webhook_status = self._send_webhook_alert(
                 webhook_url, title, threat_level, details
             )
-            action.details[f"webhook_{self.webhook_urls.index(webhook_url)}"] = webhook_status
+            action.details[f"webhook_{i}"] = webhook_status
             deliveries.append(webhook_status)
 
         delivered = sum(1 for d in deliveries if d.get("status") == "sent")
