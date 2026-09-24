@@ -39,7 +39,7 @@ class ResponseAction:
     timestamp: str
     action_type: str  # "BLOCK_IP", "ALERT", "LOG", "ISOLATE"
     target: str  # IP, hostname, etc.
-    status: str  # "SUCCESS", "FAILED", "PENDING"
+    status: str  # "SUCCESS", "PARTIAL", "FAILED", "SKIPPED", "PENDING"
     details: Dict[str, Any]
 
 
@@ -296,12 +296,15 @@ class AlertManager:
             action.status = "SUCCESS"
             return action
 
+        deliveries = []
+
         # Send to Slack
         if self.slack_webhook:
             slack_status = self._send_slack_alert(
                 title, threat_level, details
             )
             action.details["slack"] = slack_status
+            deliveries.append(slack_status)
 
         # Send to custom webhooks
         for webhook_url in self.webhook_urls:
@@ -309,9 +312,23 @@ class AlertManager:
                 webhook_url, title, threat_level, details
             )
             action.details[f"webhook_{self.webhook_urls.index(webhook_url)}"] = webhook_status
+            deliveries.append(webhook_status)
 
-        action.status = "SUCCESS"
-        self.alerts_sent += 1
+        delivered = sum(1 for d in deliveries if d.get("status") == "sent")
+
+        if not deliveries:
+            logger.warning(f"No alert channels configured; alert not sent: {title}")
+            action.status = "SKIPPED"
+        elif delivered == len(deliveries):
+            action.status = "SUCCESS"
+        elif delivered > 0:
+            action.status = "PARTIAL"
+        else:
+            logger.error(f"All {len(deliveries)} alert deliveries failed: {title}")
+            action.status = "FAILED"
+
+        if delivered:
+            self.alerts_sent += 1
         return action
 
     def _send_slack_alert(
