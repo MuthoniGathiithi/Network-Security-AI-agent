@@ -366,7 +366,7 @@ class DetectionAgent:
 
         # 5. Generate AI reasoning
         reasoning = self._generate_reasoning(
-            flow_features, ml_score, attack_type, mitre_info
+            flow_features, ml_score, is_anomaly, attack_type, mitre_info
         )
 
         # 6. Create detection result
@@ -434,6 +434,7 @@ class DetectionAgent:
         self,
         features: FlowFeatures,
         ml_score: float,
+        is_anomaly: bool,
         attack_type: str,
         mitre_info: Dict[str, Any]
     ) -> str:
@@ -443,6 +444,7 @@ class DetectionAgent:
         Args:
             features: Network flow features
             ml_score: ML anomaly score
+            is_anomaly: Whether the ML model classified the flow as anomalous
             attack_type: Classified attack type
             mitre_info: MITRE ATT&CK mapping
 
@@ -452,7 +454,15 @@ class DetectionAgent:
         reasoning_parts = []
 
         # ML analysis
-        if ml_score > 0.6:
+        if not self.ml_model.is_fitted:
+            reasoning_parts.append(
+                "ML model is not trained, so no anomaly assessment was made."
+            )
+        elif not is_anomaly:
+            reasoning_parts.append(
+                f"ML model rated this flow as normal (score: {ml_score:.2f})."
+            )
+        elif ml_score > 0.6:
             reasoning_parts.append(
                 f"ML model flagged as anomalous (score: {ml_score:.2f}). "
                 f"Pattern significantly deviates from benign traffic."
@@ -481,10 +491,17 @@ class DetectionAgent:
 
         # MITRE mapping
         techniques_str = ", ".join(mitre_info["techniques"])
-        reasoning_parts.append(
-            f"Behavior maps to MITRE ATT&CK techniques: {techniques_str} "
-            f"({mitre_info['description']})."
-        )
+        if is_anomaly:
+            reasoning_parts.append(
+                f"Behavior maps to MITRE ATT&CK techniques: {techniques_str} "
+                f"({mitre_info['description']})."
+            )
+        else:
+            reasoning_parts.append(
+                f"Heuristics matched '{attack_type}' "
+                f"(MITRE ATT&CK {techniques_str}), but without an ML anomaly "
+                f"this is informational only."
+            )
 
         return " ".join(reasoning_parts)
 
