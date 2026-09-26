@@ -438,7 +438,8 @@ class PacketCapture:
             src_ip = ip_layer.src
             dst_ip = ip_layer.dst
             protocol = ip_layer.proto
-            timestamp = packet.time
+            # Scapy uses EDecimal, which numpy cannot mix with its own types
+            timestamp = float(packet.time)
 
             # Extract ports and flags
             src_port = 0
