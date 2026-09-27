@@ -40,7 +40,6 @@ class PacketMetadata:
     dst_port: int
     packet_length: int
     flags: Dict[str, bool]
-    is_forward: bool  # True if forward, False if backward
 
 
 class FlowAggregator:
@@ -65,6 +64,8 @@ class FlowAggregator:
             "flags_fwd": defaultdict(int),
             "flags_bwd": defaultdict(int),
             "protocol": None,
+            "src_ip": None,
+            "dst_ip": None,
             "src_port": None,
             "dst_port": None,
             "first_timestamp": None,
@@ -138,17 +139,25 @@ class FlowAggregator:
 
         flow = self.flows[key]
 
-        # Initialize flow metadata
+        # Initialize flow metadata. The sender of the first packet is treated
+        # as the initiator, so "forward" means initiator -> responder.
         if flow["first_timestamp"] is None:
             flow["first_timestamp"] = metadata.timestamp
             flow["protocol"] = metadata.protocol
+            flow["src_ip"] = metadata.src_ip
+            flow["dst_ip"] = metadata.dst_ip
             flow["src_port"] = metadata.src_port
             flow["dst_port"] = metadata.dst_port
 
         flow["last_timestamp"] = metadata.timestamp
 
+        is_forward = (
+            metadata.src_ip == flow["src_ip"]
+            and metadata.src_port == flow["src_port"]
+        )
+
         # Add packet to appropriate direction
-        if metadata.is_forward:
+        if is_forward:
             flow["packets_fwd"].append(metadata.packet_length)
             flow["timestamps_fwd"].append(metadata.timestamp)
         else:
@@ -163,7 +172,7 @@ class FlowAggregator:
         # Aggregate flags
         for flag_name, flag_value in metadata.flags.items():
             if flag_value:
-                if metadata.is_forward:
+                if is_forward:
                     flow["flags_fwd"][flag_name] += 1
                 else:
                     flow["flags_bwd"][flag_name] += 1
@@ -228,8 +237,8 @@ class FlowFeatureExtractor:
         Extract features from a flow.
 
         Args:
-            src_ip: Source IP
-            dst_ip: Destination IP
+            src_ip: Initiator IP (the flow's forward direction)
+            dst_ip: Responder IP
             flow_data: Flow data from FlowAggregator
 
         Returns:
@@ -237,24 +246,13 @@ class FlowFeatureExtractor:
         """
         import numpy as np
 
-        # Determine original direction (which IP initiated)
-        # For simplicity, use alphabetically sorted IP
-        if src_ip < dst_ip:
-            forward_packets = flow_data["packets_fwd"]
-            backward_packets = flow_data["packets_bwd"]
-            fwd_timestamps = flow_data["timestamps_fwd"]
-            bwd_timestamps = flow_data["timestamps_bwd"]
-            flags_fwd = flow_data["flags_fwd"]
-            flags_bwd = flow_data["flags_bwd"]
-        else:
-            forward_packets = flow_data["packets_bwd"]
-            backward_packets = flow_data["packets_fwd"]
-            fwd_timestamps = flow_data["timestamps_bwd"]
-            bwd_timestamps = flow_data["timestamps_fwd"]
-            flags_fwd = flow_data["flags_bwd"]
-            flags_bwd = flow_data["flags_fwd"]
-            # Swap IPs for consistency
-            src_ip, dst_ip = dst_ip, src_ip
+        # FlowAggregator already stores packets relative to the initiator
+        forward_packets = flow_data["packets_fwd"]
+        backward_packets = flow_data["packets_bwd"]
+        fwd_timestamps = flow_data["timestamps_fwd"]
+        bwd_timestamps = flow_data["timestamps_bwd"]
+        flags_fwd = flow_data["flags_fwd"]
+        flags_bwd = flow_data["flags_bwd"]
 
         # Basic metrics
         flow_duration = flow_data["last_timestamp"] - flow_data["first_timestamp"]
@@ -474,9 +472,6 @@ class PacketCapture:
 
             packet_length = len(packet)
 
-            # Determine direction (simple heuristic: lower IP initiates)
-            is_forward = src_ip < dst_ip
-
             return PacketMetadata(
                 timestamp=timestamp,
                 src_ip=src_ip,
@@ -485,8 +480,7 @@ class PacketCapture:
                 src_port=src_port,
                 dst_port=dst_port,
                 packet_length=packet_length,
-                flags=flags,
-                is_forward=is_forward
+                flags=flags
             )
 
         except Exception as e:
@@ -570,13 +564,9 @@ class PacketCapture:
 
         completed_keys = []
         for flow_key, flow_data in flows:
-            # Extract original IPs from flow key
-            parts = flow_key.split("-")
-            src_ip, dst_ip = parts[0], parts[1]
-
             try:
-                features, _, _ = self.feature_extractor.extract_features(
-                    src_ip, dst_ip, flow_data
+                features, src_ip, dst_ip = self.feature_extractor.extract_features(
+                    flow_data["src_ip"], flow_data["dst_ip"], flow_data
                 )
                 yield features, src_ip, dst_ip
                 completed_keys.append(flow_key)
