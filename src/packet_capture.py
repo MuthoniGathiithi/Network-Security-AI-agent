@@ -67,6 +67,7 @@ class FlowAggregator:
             "dst_port": None,
             "first_timestamp": None,
             "last_timestamp": None,
+            "closed": False,
         })
         self.timeout = timeout
         logger.info(f"FlowAggregator initialized (timeout={timeout}s)")
@@ -132,6 +133,11 @@ class FlowAggregator:
             flow["packets_bwd"].append(metadata.packet_length)
             flow["timestamps_bwd"].append(metadata.timestamp)
 
+        # The ACK after both sides sent FIN finishes the TCP teardown
+        if (flow["flags_fwd"]["FIN"] > 0 and flow["flags_bwd"]["FIN"] > 0
+                and metadata.flags.get("ACK")):
+            flow["closed"] = True
+
         # Aggregate flags
         for flag_name, flag_value in metadata.flags.items():
             if flag_value:
@@ -142,22 +148,22 @@ class FlowAggregator:
 
     def get_completed_flows(self) -> Iterator[Tuple[str, Dict[str, Any]]]:
         """
-        Yield flows that have exceeded timeout or have significant activity.
+        Yield flows whose TCP connection has been torn down.
+
+        A flow is complete when either side sends RST, or both sides have
+        sent FIN and the final ACK has arrived. Flows that never close are emitted by get_all_flows()
+        when capture ends.
 
         Yields:
             Tuple of (flow_key, flow_data)
         """
-        current_time = None
-
         for key, flow in list(self.flows.items()):
             if flow["last_timestamp"] is None:
                 continue
 
-            # Yield flows with activity (at least 1 packet each direction)
-            if len(flow["packets_fwd"]) > 0 and len(flow["packets_bwd"]) > 0:
-                yield key, flow
-            # Yield unidirectional flows after some threshold
-            elif (len(flow["packets_fwd"]) + len(flow["packets_bwd"])) > 5:
+            reset = flow["flags_fwd"]["RST"] > 0 or flow["flags_bwd"]["RST"] > 0
+
+            if reset or flow["closed"]:
                 yield key, flow
 
     def get_all_flows(self) -> Iterator[Tuple[str, Dict[str, Any]]]:
