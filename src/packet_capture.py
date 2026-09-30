@@ -160,6 +160,18 @@ class FlowAggregator:
             elif (len(flow["packets_fwd"]) + len(flow["packets_bwd"])) > 5:
                 yield key, flow
 
+    def get_all_flows(self) -> Iterator[Tuple[str, Dict[str, Any]]]:
+        """
+        Yield every flow that has seen at least one packet, regardless of
+        completion criteria. Used to flush state when capture ends.
+
+        Yields:
+            Tuple of (flow_key, flow_data)
+        """
+        for key, flow in list(self.flows.items()):
+            if flow["last_timestamp"] is not None:
+                yield key, flow
+
     def clear_completed_flows(self, keys: List[str]) -> None:
         """
         Remove completed flows from memory.
@@ -480,19 +492,33 @@ class PacketCapture:
                     self.flow_aggregator.add_packet(metadata)
                     yield from self._emit_completed_flows()
 
+            # End of file: analyze flows that never met the completion criteria
+            yield from self._emit_completed_flows(flush=True)
+
         except Exception as e:
             logger.error(f"Failed to read pcap file: {e}")
             raise
 
-    def _emit_completed_flows(self) -> Iterator[Tuple[FlowFeatures, str, str]]:
+    def _emit_completed_flows(
+        self,
+        flush: bool = False
+    ) -> Iterator[Tuple[FlowFeatures, str, str]]:
         """
         Extract features for completed flows, yield them, and evict them.
+
+        Args:
+            flush: If True, emit every remaining flow (end of capture)
 
         Yields:
             Tuple of (FlowFeatures, src_ip, dst_ip) for completed flows
         """
+        if flush:
+            flows = self.flow_aggregator.get_all_flows()
+        else:
+            flows = self.flow_aggregator.get_completed_flows()
+
         completed_keys = []
-        for flow_key, flow_data in self.flow_aggregator.get_completed_flows():
+        for flow_key, flow_data in flows:
             # Extract original IPs from flow key
             parts = flow_key.split("-")
             src_ip, dst_ip = parts[0], parts[1]
@@ -552,6 +578,9 @@ class PacketCapture:
                 if metadata:
                     self.flow_aggregator.add_packet(metadata)
                     yield from self._emit_completed_flows()
+
+            # Capture finished (packet_count reached): flush remaining flows
+            yield from self._emit_completed_flows(flush=True)
 
         except Exception as e:
             logger.error(f"Live capture failed: {e}")
