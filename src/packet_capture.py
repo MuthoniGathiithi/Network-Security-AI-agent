@@ -6,6 +6,7 @@ Extracts NetFlow-style features for ML analysis.
 """
 
 import logging
+import queue
 from typing import Iterator, Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
@@ -13,7 +14,7 @@ import struct
 import socket
 
 try:
-    from scapy.all import sniff, rdpcap, IP, TCP, UDP, ICMP, Raw
+    from scapy.all import AsyncSniffer, rdpcap, IP, TCP, UDP, ICMP, Raw
 except ImportError:
     raise ImportError("Scapy not installed. Install with: pip install scapy")
 
@@ -477,28 +478,35 @@ class PacketCapture:
                 metadata = self._extract_packet_info(packet)
                 if metadata:
                     self.flow_aggregator.add_packet(metadata)
-
-                    # Yield completed flows
-                    completed_keys = []
-                    for flow_key, flow_data in self.flow_aggregator.get_completed_flows():
-                        # Extract original IPs from flow key
-                        parts = flow_key.split("-")
-                        src_ip, dst_ip = parts[0], parts[1]
-
-                        try:
-                            features, _, _ = self.feature_extractor.extract_features(
-                                src_ip, dst_ip, flow_data
-                            )
-                            yield features, src_ip, dst_ip
-                            completed_keys.append(flow_key)
-                        except Exception as e:
-                            logger.debug(f"Feature extraction failed: {e}")
-
-                    self.flow_aggregator.clear_completed_flows(completed_keys)
+                    yield from self._emit_completed_flows()
 
         except Exception as e:
             logger.error(f"Failed to read pcap file: {e}")
             raise
+
+    def _emit_completed_flows(self) -> Iterator[Tuple[FlowFeatures, str, str]]:
+        """
+        Extract features for completed flows, yield them, and evict them.
+
+        Yields:
+            Tuple of (FlowFeatures, src_ip, dst_ip) for completed flows
+        """
+        completed_keys = []
+        for flow_key, flow_data in self.flow_aggregator.get_completed_flows():
+            # Extract original IPs from flow key
+            parts = flow_key.split("-")
+            src_ip, dst_ip = parts[0], parts[1]
+
+            try:
+                features, _, _ = self.feature_extractor.extract_features(
+                    src_ip, dst_ip, flow_data
+                )
+                yield features, src_ip, dst_ip
+                completed_keys.append(flow_key)
+            except Exception as e:
+                logger.debug(f"Feature extraction failed: {e}")
+
+        self.flow_aggregator.clear_completed_flows(completed_keys)
 
     def capture_live(
         self,
@@ -517,28 +525,42 @@ class PacketCapture:
         Yields:
             Tuple of (FlowFeatures, src_ip, dst_ip) for completed flows
         """
-        def packet_handler(packet):
-            if callback:
-                callback(packet)
-
-            metadata = self._extract_packet_info(packet)
-            if metadata:
-                self.flow_aggregator.add_packet(metadata)
+        # Sniff in a background thread and hand packets over through a queue,
+        # so this generator can yield flows while capture is still running.
+        packet_queue: "queue.Queue[Any]" = queue.Queue()
+        sniffer = AsyncSniffer(
+            iface=interface,
+            prn=packet_queue.put,
+            count=packet_count if packet_count > 0 else 0,
+            store=False
+        )
 
         try:
             logger.info(f"Starting live capture on {interface or 'default interface'}")
+            sniffer.start()
 
-            # Note: sniff is blocking. In production, use threading.
-            sniff(
-                iface=interface,
-                prn=packet_handler,
-                count=packet_count if packet_count > 0 else 0,
-                store=False
-            )
+            while sniffer.thread.is_alive() or not packet_queue.empty():
+                try:
+                    packet = packet_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+                if callback:
+                    callback(packet)
+
+                metadata = self._extract_packet_info(packet)
+                if metadata:
+                    self.flow_aggregator.add_packet(metadata)
+                    yield from self._emit_completed_flows()
 
         except Exception as e:
             logger.error(f"Live capture failed: {e}")
             raise
+        finally:
+            # `running` stays True if the sniff thread crashed (e.g. no root),
+            # and stop() then raises, so check the thread itself.
+            if sniffer.thread is not None and sniffer.thread.is_alive():
+                sniffer.stop()
 
 
 # ==================== Example Usage ====================
