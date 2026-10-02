@@ -138,6 +138,12 @@ class IPBlockManager:
         )
 
         try:
+            if self.dry_run:
+                logger.info(f"[DRY RUN] Would unblock {ip_address}")
+                action.status = "SUCCESS"
+                action.details["message"] = "Dry-run successful"
+                return action
+
             if os.geteuid() == 0:
                 # Remove from iptables
                 subprocess.run(
