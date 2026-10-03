@@ -299,10 +299,10 @@ class FlowFeatureExtractor:
         active_min = np.min(active_times[::2]) if len(active_times) > 1 else 0
 
         idle_times = active_times[1::2] if len(active_times) > 1 else [0]
-        idle_mean = np.mean(idle_times) if idle_times else 0
-        idle_std = np.std(idle_times) if idle_times else 0
-        idle_max = np.max(idle_times) if idle_times else 0
-        idle_min = np.min(idle_times) if idle_times else 0
+        idle_mean = np.mean(idle_times) if len(idle_times) > 0 else 0
+        idle_std = np.std(idle_times) if len(idle_times) > 0 else 0
+        idle_max = np.max(idle_times) if len(idle_times) > 0 else 0
+        idle_min = np.min(idle_times) if len(idle_times) > 0 else 0
 
         features = FlowFeatures(
             duration=flow_duration,
