@@ -244,6 +244,7 @@ class FlowFeatureExtractor:
             flow_iat_max = np.max(flow_iats)
             flow_iat_min = np.min(flow_iats)
         else:
+            flow_iats = np.array([])
             flow_iat_mean = flow_iat_std = flow_iat_max = flow_iat_min = 0
 
         # Forward inter-arrival time
