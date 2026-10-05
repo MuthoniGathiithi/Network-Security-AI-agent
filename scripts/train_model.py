@@ -3,6 +3,7 @@
 Script to train the ML model for the Network Security AI Agent.
 """
 
+import json
 import os
 import sys
 import logging
